@@ -25,6 +25,7 @@ Thumbs.db
 
 # Data (root level only)
 /data/
+/outputs/
 *.bin
 *.safetensors
 *.pth

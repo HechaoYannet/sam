@@ -7,6 +7,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -190,7 +192,7 @@ class SAMTrainer:
                     if "loss_analogy" in metrics:
                         self.writer.add_scalar("train/loss_analogy", metrics["loss_analogy"] / n_batches, self.global_step)
                     self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
-                    self.writer.add_scalar("train/phase", list(["warmup", "relation", "analogy", "finetune"].index(phase)), self.global_step)
+                    self.writer.add_scalar("train/phase", ["warmup", "relation", "analogy", "finetune"].index(phase), self.global_step)
 
                 self.global_step += 1
 
@@ -226,7 +228,15 @@ class SAMTrainer:
 
                 metrics["val_align"] += self.loss_align(z_v, z_s).item()
 
-                # Analogy evaluation
+                # Relation loss on scene pairs (within-batch)
+                if z_v.shape[0] >= 2:
+                    mid = z_v.shape[0] // 2
+                    if mid > 0:
+                        za, zb = z_v[:mid], z_v[mid:2*mid]
+                        sa, sb = z_s[:mid], z_s[mid:2*mid]
+                        metrics["val_rel"] += self.loss_rel(za, zb, sa, sb).item()
+
+                # Analogy evaluation (if analogy data available)
                 if analogy_iter:
                     try:
                         a_batch = next(analogy_iter)
@@ -235,8 +245,6 @@ class SAMTrainer:
                         zb = self.model.encode_visual(a_batch["img_b"])
                         sa = self.model.encode_symbol(a_batch["sym_a"])
                         sb = self.model.encode_symbol(a_batch["sym_b"])
-                        metrics["val_align"] += (self.loss_align(za, sa).item() + self.loss_align(zb, sb).item()) / 2
-                        metrics["val_rel"] += self.loss_rel(za, zb, sa, sb).item()
                         metrics["val_analogy"] += self.loss_analogy(za, zb, sa, sb).item()
                     except StopIteration:
                         pass
@@ -357,25 +365,14 @@ class SAMTrainer:
 
         torch.save(ckpt, str(path))
 
-        # Track latest checkpoint
-        latest_link = self.output_dir / "checkpoint_latest.pt"
-        if latest_link.exists() or latest_link.is_symlink():
-            latest_link.unlink()
-        try:
-            latest_link.symlink_to(path.name)
-        except OSError:
-            # symlink not supported, just copy the name
-            pass
+        # Track latest checkpoint (copy, no symlink needed on Windows)
+        import shutil
+        latest_path = self.output_dir / "checkpoint_latest.pt"
+        shutil.copy2(str(path), str(latest_path))
 
         if is_best:
             best_path = self.output_dir / "checkpoint_best.pt"
-            if best_path.exists():
-                best_path.unlink()
-            try:
-                best_path.symlink_to(path.name)
-            except OSError:
-                import shutil
-                shutil.copy2(str(path), str(best_path))
+            shutil.copy2(str(path), str(best_path))
 
         # Log to structured log
         entry = {
