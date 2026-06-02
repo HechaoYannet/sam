@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Superpowers
+.superpowers/
+
+# Data
+data/
+*.bin
+*.safetensors
+*.pth
+*.pt
+
+# Logs
+*.log
+runs/
+lightning_logs/
+wandb/
+
+# Environment
+.env
+.env.local
