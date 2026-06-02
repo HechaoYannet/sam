@@ -51,6 +51,8 @@ class VisualEncoder(nn.Module):
         Returns:
             z: (B, manifold_dim) manifold embeddings
         """
-        features = self.vit.forward_features(x)  # (B, 192)
-        z = self.projection(features)             # (B, manifold_dim)
+        features = self.vit.forward_features(x)  # (B, N+1, 192) — full token sequence
+        # Extract CLS token (first position)
+        cls_token = features[:, 0, :]            # (B, 192)
+        z = self.projection(cls_token)            # (B, manifold_dim)
         return z
