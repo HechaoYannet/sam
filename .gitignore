@@ -23,8 +23,8 @@ Thumbs.db
 # Superpowers
 .superpowers/
 
-# Data
-data/
+# Data (root level only)
+/data/
 *.bin
 *.safetensors
 *.pth
