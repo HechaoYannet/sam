@@ -1,6 +1,6 @@
 # SAM: Shared Analogical Manifold — Architecture & Programmatic Design
 
-**版本**: v1.0 | **日期**: 2026-06-02 | **状态**: Design Phase
+**版本**: v1.1 | **日期**: 2026-06-02 | **状态**: P0 Complete, P1 Pending
 
 ---
 
@@ -93,7 +93,7 @@ $$E_v(I_{\text{red\_cube}}) - E_s(\text{"red"}) + E_s(\text{"blue"}) \approx E_v
 | 项目 | 选择 | 理由 |
 |------|------|------|
 | Backbone | ViT-Tiny/16 (5.5M) | 8GB VRAM 约束下的最优选择 |
-| 预训练 | ImageNet-1k 权重 | 避免从零学底层特征，加速收敛 |
+| 预训练 | ImageNet-1k 权重 (ModelScope) | 避免从零学底层特征；通过 `scripts/download_vit_weights.py` 从 ModelScope 下载，缓存于 `~/.cache/sam/pretrained/`。设置 `SAM_PRETRAINED_VIT` 环境变量指向下载目录，若未设置则退回到 HuggingFace Hub |
 | Patch size | 16×16 | 224/16 = 14×14 = 196 patches |
 | 输出方式 | CLS token → Linear(192→256) | 全局表示，维度匹配流形 |
 | 冻结策略 | 前 8 层冻结，后 4 层可训练 | 保留底层特征，允许高层适应流形 |
