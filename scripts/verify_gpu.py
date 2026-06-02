@@ -22,7 +22,7 @@ def to_device(obj, device):
 
 cfg = Config()
 cfg.device = 'cuda'
-cfg.model.vit_pretrained = False  # skip HF download for VRAM check only
+cfg.model.vit_pretrained = True   # use pretrained (local or HF)
 
 cat_to_idx, cat_sizes, _ = build_vocabs(cfg.data)
 

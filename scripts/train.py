@@ -1,12 +1,21 @@
 """SAM Training Script.
 
 Usage:
+    # New training
     python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1
+
+    # Resume from checkpoint
+    python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1 --resume
+
+    # Resume from specific checkpoint
+    python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1 --resume checkpoint_epoch030.pt
+
+    # Monitor with TensorBoard
+    tensorboard --logdir outputs/run1/tensorboard
 """
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -25,36 +34,8 @@ from sam.data.dataset import (
 )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train SAM model")
-    parser.add_argument("--data_dir", type=str, default="data/sam_dataset",
-                        help="Path to generated dataset")
-    parser.add_argument("--output_dir", type=str, default="outputs/run1",
-                        help="Output directory for checkpoints and logs")
-    parser.add_argument("--epochs", type=int, default=60,
-                        help="Number of training epochs")
-    parser.add_argument("--device", type=str, default="cuda",
-                        help="Device: cuda or cpu")
-    args = parser.parse_args()
-
-    cfg = Config()
-    cfg.device = args.device if torch.cuda.is_available() else "cpu"
-    cfg.train.epochs = args.epochs
-
-    data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Device: {cfg.device}")
-    print(f"Data directory: {data_dir}")
-    print(f"Output directory: {output_dir}")
-
-    # Build vocabularies
-    cat_to_idx, cat_sizes, idx_to_token = build_vocabs(cfg.data)
-    print(f"Vocab sizes: {cat_sizes}")
-
-    # Load metadata
-    print("Loading metadata...")
+def load_metadata(data_dir: Path):
+    """Load all dataset metadata files."""
     with open(data_dir / "single_objects_meta.json") as f:
         single_meta = json.load(f)
 
@@ -72,113 +53,216 @@ def main():
             with open(path) as f:
                 analogy_meta[split] = json.load(f)
 
-    # Create datasets
-    single_dataset = SingleObjectDataset(single_meta, cat_to_idx)
-    single_loader = DataLoader(single_dataset, batch_size=cfg.train.micro_batch_size,
-                               shuffle=True, num_workers=cfg.train.num_workers,
-                               collate_fn=collate_fn)
+    return single_meta, scenes_meta, analogy_meta
 
+
+def build_loaders(cfg, cat_to_idx, single_meta, scenes_meta, analogy_meta):
+    """Build all DataLoaders."""
+    kwargs = dict(
+        num_workers=cfg.train.num_workers,
+        collate_fn=collate_fn,
+    )
+
+    # Single objects (warmup)
+    single_dataset = SingleObjectDataset(single_meta, cat_to_idx)
+    single_loader = DataLoader(
+        single_dataset, batch_size=cfg.train.micro_batch_size,
+        shuffle=True, **kwargs,
+    )
+
+    # Scene loaders
     scene_loaders = {}
     for split in ["train", "val", "test_iid", "test_ood"]:
         if split in scenes_meta:
             dataset = SceneDataset(scenes_meta[split], cat_to_idx)
-            shuffle = (split == "train")
             scene_loaders[split] = DataLoader(
                 dataset, batch_size=cfg.train.micro_batch_size,
-                shuffle=shuffle, num_workers=cfg.train.num_workers,
-                collate_fn=collate_fn,
+                shuffle=(split == "train"), **kwargs,
             )
 
+    # Analogy loaders
     analogy_loaders = {}
     for split in ["train", "val", "test_iid", "test_ood"]:
         if split in analogy_meta and len(analogy_meta[split]) > 0:
             dataset = AnalogyDataset(analogy_meta[split], cat_to_idx)
-            shuffle = (split == "train")
             analogy_loaders[split] = DataLoader(
                 dataset, batch_size=cfg.train.micro_batch_size,
-                shuffle=shuffle, num_workers=cfg.train.num_workers,
-                collate_fn=collate_fn,
+                shuffle=(split == "train"), **kwargs,
             )
 
-    print(f"Single objects: {len(single_dataset)}")
-    print(f"Train scenes: {len(scenes_meta.get('train', []))}")
-    print(f"Train analogies: {len(analogy_meta.get('train', []))}")
+    return single_loader, scene_loaders, analogy_loaders
 
-    # Initialize model
-    visual_encoder = VisualEncoder(cfg.model, manifold_dim=cfg.model.manifold_dim)
-    symbol_encoder = SymbolEncoder(
+
+def main():
+    parser = argparse.ArgumentParser(description="Train SAM model")
+    parser.add_argument("--data_dir", type=str, default="data/sam_dataset")
+    parser.add_argument("--output_dir", type=str, default="outputs/run1")
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--resume", nargs="?", const="auto", default=None,
+                        help="Resume from checkpoint. 'auto' finds latest, or specify path.")
+    parser.add_argument("--no_amp", action="store_true",
+                        help="Disable automatic mixed precision")
+    args = parser.parse_args()
+
+    cfg = Config()
+    cfg.device = args.device if torch.cuda.is_available() else "cpu"
+    cfg.train.epochs = args.epochs
+    if args.no_amp:
+        cfg.train.use_amp = False
+
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"{'='*60}")
+    print(f"SAM Training")
+    print(f"{'='*60}")
+    print(f"Device:    {cfg.device}")
+    print(f"Data:      {data_dir}")
+    print(f"Output:    {output_dir}")
+    print(f"Epochs:    {cfg.train.epochs}")
+    print(f"Batch:     {cfg.train.micro_batch_size} × {cfg.train.gradient_accumulation_steps} = {cfg.train.micro_batch_size * cfg.train.gradient_accumulation_steps}")
+    print(f"AMP:       {cfg.train.use_amp}")
+    print(f"{'='*60}")
+
+    # Vocab
+    cat_to_idx, cat_sizes, _ = build_vocabs(cfg.data)
+    print(f"Vocab sizes: {cat_sizes}")
+
+    # Data
+    single_meta, scenes_meta, analogy_meta = load_metadata(data_dir)
+    single_loader, scene_loaders, analogy_loaders = build_loaders(
+        cfg, cat_to_idx, single_meta, scenes_meta, analogy_meta
+    )
+
+    print(f"Train scenes:     {len(scenes_meta.get('train', []))}")
+    print(f"Val scenes:       {len(scenes_meta.get('val', []))}")
+    print(f"Train analogies:  {len(analogy_meta.get('train', []))}")
+    print(f"Val analogies:    {len(analogy_meta.get('val', []))}")
+
+    # Model
+    visual = VisualEncoder(cfg.model, manifold_dim=cfg.model.manifold_dim)
+    symbol = SymbolEncoder(
         cat_sizes=cat_sizes,
         embed_dim=cfg.model.symbol_embed_dim,
         hidden_dim=cfg.model.symbol_hidden_dim,
         manifold_dim=cfg.model.manifold_dim,
     )
-    model = SAMPipeline(
-        visual_encoder=visual_encoder,
-        symbol_encoder=symbol_encoder,
-        manifold_dim=cfg.model.manifold_dim,
-    )
+    model = SAMPipeline(visual, symbol, manifold_dim=cfg.model.manifold_dim)
     model = model.to(cfg.device)
 
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {n_params:,} total, {n_trainable:,} trainable")
+    print(f"Parameters:   {n_params:,} total, {n_trainable:,} trainable")
 
-    # VRAM check: single forward pass
-    print("\nVRAM check: running single forward pass...")
-    model.eval()
-    with torch.no_grad():
-        # Get a sample batch from train loader
-        sample_batch = next(iter(scene_loaders["train"]))
-        sample_batch = {
-            k: v.to(cfg.device) if isinstance(v, torch.Tensor) else v
-            for k, v in sample_batch.items()
-        }
-        z_v = model.encode_visual(sample_batch["image"])
-        z_s = model.encode_symbol(sample_batch["tokens"])
-        print(f"  Visual output shape: {z_v.shape}")
-        print(f"  Symbol output shape: {z_s.shape}")
+    # VRAM check
+    if cfg.device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        print(f"VRAM:         {torch.cuda.max_memory_allocated() / 1024**2:.0f} MB (initial)")
+        print(f"TensorBoard:  tensorboard --logdir {output_dir / 'tensorboard'}")
 
-        if torch.cuda.is_available():
-            vram_mb = torch.cuda.max_memory_allocated() / 1024**2
-            print(f"  Peak VRAM: {vram_mb:.1f} MB")
-            if vram_mb < 4096:
-                print(f"  [PASS] VRAM < 4GB ✓")
-            else:
-                print(f"  [WARN] VRAM > 4GB threshold")
+    # Trainer
+    trainer = SAMTrainer(model, cfg, cat_sizes, output_dir=str(output_dir))
 
-    # Train
-    trainer = SAMTrainer(
-        model=model,
-        cfg=cfg,
-        cat_sizes=cat_sizes,
-        output_dir=str(output_dir),
-    )
+    # Resume
+    start_epoch = 1
+    if args.resume is not None:
+        if args.resume == "auto":
+            resume_path = trainer.find_latest_checkpoint()
+        else:
+            resume_path = args.resume
+            if not Path(resume_path).is_absolute():
+                resume_path = output_dir / resume_path
 
-    print(f"\nStarting training for {cfg.train.epochs} epochs...")
-    for epoch in range(1, cfg.train.epochs + 1):
-        trainer.current_epoch = epoch
-        metrics = trainer.train_epoch(
-            single_loader=single_loader,
-            scene_loader=scene_loaders.get("train"),
-            analogy_loader=analogy_loaders.get("train"),
-            epoch=epoch,
-        )
+        if resume_path and Path(str(resume_path)).exists():
+            start_epoch = trainer.load_checkpoint(str(resume_path)) + 1
+            print(f"Resumed from {resume_path}, restarting at epoch {start_epoch}")
+        else:
+            print(f"No checkpoint found at {resume_path}, starting fresh")
 
-        if metrics:
-            metric_str = " | ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-            print(f"Epoch {epoch}: {metric_str}")
+    # Training loop
+    print(f"\n{'='*60}")
+    print(f"Starting training from epoch {start_epoch}")
+    print(f"{'='*60}\n")
 
-        # Save checkpoint every 10 epochs
-        if epoch % 10 == 0:
-            ckpt_path = trainer.save_checkpoint(
-                str(output_dir / f"checkpoint_epoch{epoch}.pt")
+    try:
+        for epoch in range(start_epoch, cfg.train.epochs + 1):
+            trainer.current_epoch = epoch
+            epoch_start = time.time()
+
+            # Train
+            train_metrics = trainer.train_epoch(
+                scene_loader=scene_loaders.get("train"),
+                analogy_loader=analogy_loaders.get("train"),
             )
-            print(f"  Saved checkpoint: {ckpt_path}")
 
-    # Final save
-    final_path = trainer.save_checkpoint(str(output_dir / "checkpoint_final.pt"))
-    print(f"\nTraining complete! Final checkpoint: {final_path}")
+            # Validate (every 5 epochs to save time, or every epoch if small dataset)
+            val_metrics = {}
+            do_val = (epoch % 5 == 0 or epoch == cfg.train.epochs or
+                       len(scenes_meta.get("val", [])) < 500)
+            if do_val and scene_loaders.get("val"):
+                val_metrics = trainer.validate(
+                    scene_loader=scene_loaders["val"],
+                    analogy_loader=analogy_loaders.get("val"),
+                )
+
+            # Scheduler step
+            trainer.scheduler.step()
+
+            # Log epoch-level metrics
+            epoch_time = time.time() - epoch_start
+            trainer.writer.add_scalar("epoch/time_seconds", epoch_time, epoch)
+            trainer.writer.add_scalar("epoch/lr", trainer.optimizer.param_groups[0]["lr"], epoch)
+            for k, v in train_metrics.items():
+                trainer.writer.add_scalar(f"epoch/{k}", v, epoch)
+
+            # Monitoring & best model tracking
+            total_val_loss = val_metrics.get("val_align", float("inf"))
+            signals = trainer.check_improvement(total_val_loss)
+            is_best = signals["improved"]
+
+            # Print summary
+            phase = trainer._get_phase(epoch)
+            status = ""
+            if is_best:
+                status += " [BEST]"
+            if signals.get("plateau_warning"):
+                status += " [PLATEAU]"
+            train_str = " | ".join(f"{k}: {v:.4f}" for k, v in train_metrics.items())
+            val_str = " | ".join(f"{k}: {v:.4f}" for k, v in val_metrics.items())
+            print(f"Epoch {epoch:3d} [{phase:8s}] {epoch_time:.1f}s{status}")
+            print(f"  Train: {train_str}")
+            if val_str:
+                print(f"  Val:   {val_str}")
+            if signals.get("suggestion"):
+                print(f"  [MONITOR] {signals['suggestion']}")
+
+            # Save checkpoint
+            trainer.save_checkpoint(
+                str(output_dir / f"checkpoint_epoch{epoch:03d}.pt"),
+                metrics={**train_metrics, **val_metrics},
+                is_best=is_best,
+            )
+
+    except KeyboardInterrupt:
+        print(f"\n\nTraining interrupted at epoch {trainer.current_epoch}.")
+        print("Saving emergency checkpoint...")
+        trainer.save_checkpoint(
+            str(output_dir / f"checkpoint_interrupt_epoch{trainer.current_epoch:03d}.pt"),
+            metrics=train_metrics,
+        )
+        print("Done. Resume later with --resume")
+
+    finally:
+        trainer.close()
+
+    print(f"\nTraining complete!")
+    print(f"Best validation loss: {trainer.best_val_loss:.4f}")
+    print(f"Checkpoints saved in: {output_dir}")
+    print(f"TensorBoard: tensorboard --logdir {output_dir / 'tensorboard'}")
 
 
 if __name__ == "__main__":
+    import time
     main()

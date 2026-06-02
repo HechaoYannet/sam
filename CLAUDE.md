@@ -32,6 +32,20 @@ python scripts/generate_data.py --output_dir data/sam_dataset
 # Train (all phases: warmup → relation → analogy → finetune)
 python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1
 
+# Resume from checkpoint
+python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1 --resume
+
+# Resume from specific checkpoint
+python scripts/train.py --data_dir data/sam_dataset --output_dir outputs/run1 --resume checkpoint_epoch030.pt
+
+# Visualize training progress (in another terminal)
+tensorboard --logdir outputs/run1/tensorboard
+
+# AI training companion — monitor progress automatically
+python scripts/monitor.py --output_dir outputs/run1           # continuous watch (60s interval)
+python scripts/monitor.py --output_dir outputs/run1 --once    # one-shot report
+python scripts/monitor.py --output_dir outputs/run1 --interval 30  # custom interval
+
 # Quick smoke test (mini dataset)
 python scripts/generate_data.py --output_dir data/test_mini --n_train 100 --n_val 20 --n_test_iid 20 --n_test_ood 20
 python scripts/train.py --data_dir data/test_mini --output_dir outputs/test_run --epochs 5
@@ -72,18 +86,36 @@ sam/
 │   ├── analogy.py    — L_analogy: vector arithmetic completion
 │   └── disentangle.py — L_disentangle: cross-category orthogonality
 ├── trainer.py        — SAMPipeline + SAMTrainer (4-phase curriculum, grad accum, AMP)
-└── eval/             — Evaluation modules (E1/E2/E3, not yet implemented)
+│                       TensorBoard logging, checkpoint/resume, plateau detection
+├── eval/             — Evaluation modules (E1/E2/E3, not yet implemented)
 scripts/
 ├── generate_data.py      — Full dataset generation entry point
 ├── train.py              — Training entry point (with VRAM check)
 ├── download_vit_weights.py — ModelScope weight downloader
 ├── check_env.py          — Dependency/GPU version check
-└── verify_gpu.py         — GPU forward pass + VRAM measurement
+├── verify_gpu.py         — GPU forward pass + VRAM measurement
+└── monitor.py            — AI training companion: convergence detection,
+                            plateau warnings, anomaly alerts, progress reports
 ```
 
 ## Current Status
 
-- **P0 (Infrastructure):** Complete. Data pipeline, model, trainer, entry scripts all verified.
+- **P0 (Infrastructure):** Complete.
   - 5.78M params, peak VRAM ~49 MB (forward pass)
   - ModelScope pretrained weights downloaded (21.8 MB)
+  - TensorBoard logging, checkpoint/resume, AI monitor all wired in
 - **P1 (Alignment):** Next phase. Single-object alignment training with L_align.
+
+### Training output structure
+
+```
+outputs/run1/
+├── tensorboard/              — TensorBoard event files
+├── checkpoint_epochXXX.pt    — Periodic checkpoints (full state)
+├── checkpoint_best.pt        — Best model by validation loss
+├── checkpoint_latest.pt      — Latest checkpoint (for --resume auto)
+├── run_config.json           — Run configuration for reproducibility
+├── run_summary.json          — Final summary after training completes
+├── training_log.jsonl        — Structured event log (checkpoints, alerts)
+└── monitor_report.json       — Latest monitor analysis
+```
