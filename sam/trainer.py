@@ -132,9 +132,13 @@ class SAMTrainer:
         elif phase == "relation":
             return {"align": 1.0, "rel": cfg.alpha_rel, "analogy": 0.0, "disentangle": 0.0}
         elif phase == "analogy":
+            # Delay disentangle: start at 10% of original weight, ramp up
+            disentangle_weight = cfg.gamma_disentangle
+            if self.current_epoch < 10:  # first 4 epochs of analogy phase: half weight
+                disentangle_weight *= 0.5
             return {"align": 1.0, "rel": cfg.alpha_rel,
-                    "analogy": cfg.beta_analogy, "disentangle": cfg.gamma_disentangle}
-        else:
+                    "analogy": cfg.beta_analogy, "disentangle": disentangle_weight}
+        else:  # finetune
             return {"align": 0.5, "rel": cfg.alpha_rel,
                     "analogy": cfg.beta_analogy, "disentangle": cfg.gamma_disentangle}
 

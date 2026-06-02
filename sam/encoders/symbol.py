@@ -40,8 +40,9 @@ class SymbolEncoder(nn.Module):
 
         Args:
             tokens: Dict mapping category -> LongTensor of shape (B, N_objects)
-            return_per_category: if True, also returns per-category embeddings
-                as a dict of {category_name: (B, manifold_dim)} for disentanglement.
+            return_per_category: if True, also returns raw per-category embeddings
+                as a dict of {category_name: (B, embed_dim)} for disentanglement.
+                These are the pre-pooling raw embedding vectors (no extra parameters).
 
         Returns:
             z: (B, manifold_dim) manifold embeddings
@@ -61,16 +62,7 @@ class SymbolEncoder(nn.Module):
         z = self.projection(combined)
 
         if return_per_category:
-            # Project each category embedding to manifold space
-            per_cat = {}
-            for cat, emb in per_cat_raw.items():
-                # Use a simple linear projection to manifold dim
-                if not hasattr(self, 'cat_projections'):
-                    self.cat_projections = nn.ModuleDict()
-                if cat not in self.cat_projections:
-                    self.cat_projections[cat] = nn.Linear(
-                        self.embed_dim, self.manifold_dim
-                    ).to(emb.device)
-                per_cat[cat] = self.cat_projections[cat](emb)
-            return z, per_cat
+            # Return raw per-category embeddings (64-dim) for disentanglement.
+            # No extra parameters — disentanglement works on raw embedding vectors.
+            return z, {cat: emb for cat, emb in per_cat_raw.items()}
         return z

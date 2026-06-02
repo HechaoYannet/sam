@@ -28,8 +28,13 @@ class AnalogyLoss(nn.Module):
         # Vector arithmetic in the manifold
         z_sb_pred = z_vb - z_va + z_sa
 
+        # Normalize prediction to avoid norm explosion
+        z_sb_pred = torch.nn.functional.normalize(z_sb_pred, p=2, dim=-1, eps=1e-8)
+
         # Cosine distance between predicted and true
         cosine_sim = (z_sb_pred * z_sb_true).sum(dim=-1)
+        # Clamp to [-1, 1] for numerical safety
+        cosine_sim = cosine_sim.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
         loss = (1.0 - cosine_sim).mean()
 
         return loss
