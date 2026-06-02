@@ -34,25 +34,43 @@ class SymbolEncoder(nn.Module):
             nn.LayerNorm(manifold_dim),
         )
 
-    def forward(self, tokens: dict[str, torch.Tensor]) -> torch.Tensor:
+    def forward(self, tokens: dict[str, torch.Tensor],
+                return_per_category: bool = False):
         """Encode structured symbol tokens to manifold point.
 
         Args:
             tokens: Dict mapping category -> LongTensor of shape (B, N_objects)
-                    where N_objects is 1 for single-object, 2 for scenes, etc.
-                    REL category may have a different N.
+            return_per_category: if True, also returns per-category embeddings
+                as a dict of {category_name: (B, manifold_dim)} for disentanglement.
 
         Returns:
             z: (B, manifold_dim) manifold embeddings
+            per_cat: (only if return_per_category=True) dict of per-category vectors
         """
-        embeddings = []
+        per_cat_raw = {}  # per-category embeddings before projection
         for cat, emb_layer in self.embeddings.items():
             if cat in tokens:
-                cat_indices = tokens[cat]                     # (B, N_objects)
-                cat_emb = emb_layer(cat_indices)               # (B, N_objects, embed_dim)
-                cat_emb = cat_emb.mean(dim=1)                  # (B, embed_dim) — pool across objects
-                embeddings.append(cat_emb)
+                cat_indices = tokens[cat]
+                cat_emb = emb_layer(cat_indices)
+                cat_emb = cat_emb.mean(dim=1)
+                per_cat_raw[cat] = cat_emb
 
-        combined = torch.cat(embeddings, dim=-1)               # (B, total_embed_dim)
-        z = self.projection(combined)                          # (B, manifold_dim)
+        # Build combined embedding
+        combined_list = [per_cat_raw[cat] for cat in sorted(per_cat_raw.keys())]
+        combined = torch.cat(combined_list, dim=-1)
+        z = self.projection(combined)
+
+        if return_per_category:
+            # Project each category embedding to manifold space
+            per_cat = {}
+            for cat, emb in per_cat_raw.items():
+                # Use a simple linear projection to manifold dim
+                if not hasattr(self, 'cat_projections'):
+                    self.cat_projections = nn.ModuleDict()
+                if cat not in self.cat_projections:
+                    self.cat_projections[cat] = nn.Linear(
+                        self.embed_dim, self.manifold_dim
+                    ).to(emb.device)
+                per_cat[cat] = self.cat_projections[cat](emb)
+            return z, per_cat
         return z

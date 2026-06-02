@@ -17,6 +17,7 @@ from sam.manifold.projection import ManifoldProjection
 from sam.losses.align import AlignmentLoss
 from sam.losses.relational import RelationalConsistencyLoss
 from sam.losses.analogy import AnalogyLoss
+from sam.losses.disentangle import DisentangleLoss
 
 
 class SAMPipeline(nn.Module):
@@ -32,7 +33,10 @@ class SAMPipeline(nn.Module):
     def encode_visual(self, x):
         return self.v_proj(self.visual_encoder(x))
 
-    def encode_symbol(self, tokens):
+    def encode_symbol(self, tokens, return_per_category=False):
+        if return_per_category:
+            z, per_cat = self.symbol_encoder(tokens, return_per_category=True)
+            return self.s_proj(z), per_cat
         return self.s_proj(self.symbol_encoder(tokens))
 
 
@@ -55,6 +59,7 @@ class SAMTrainer:
         self.loss_align = AlignmentLoss(temperature=cfg.loss.alignment_temperature)
         self.loss_rel = RelationalConsistencyLoss()
         self.loss_analogy = AnalogyLoss()
+        self.loss_disentangle = DisentangleLoss()
 
         # Optimizer
         proj_params = list(model.v_proj.parameters()) + list(model.s_proj.parameters())
@@ -257,13 +262,46 @@ class SAMTrainer:
 
         return dict(metrics)
 
+    def _compute_disentangle(self, per_cat, tokens):
+        """Compute disentanglement loss from per-category embeddings.
+
+        Groups embeddings by attribute value within each category,
+        then measures cross-category orthogonality.
+        """
+        attr_vectors = {}
+        attr_categories = ["COL", "SIZE", "MAT"]  # disentangle non-identity attributes
+
+        for cat in attr_categories:
+            if cat not in per_cat or cat not in tokens:
+                continue
+            embeddings = per_cat[cat]          # (B, D)
+            indices = tokens[cat]              # (B, N_objects)
+            # Use first object's attribute value
+            vals = indices[:, 0]               # (B,)
+
+            # Group by attribute value and average
+            unique_vals = vals.unique()
+            cat_vectors = []
+            for uv in unique_vals:
+                mask = (vals == uv)
+                if mask.sum() > 0:
+                    cat_vectors.append(embeddings[mask].mean(dim=0))
+            if len(cat_vectors) >= 2:
+                attr_vectors[cat] = torch.stack(cat_vectors)  # (N_values, D)
+
+        if len(attr_vectors) < 2:
+            return torch.tensor(0.0, device=self.device)
+
+        return self.loss_disentangle(attr_vectors)
+
     def _scene_step(self, batch, loss_weights):
         batch = self._to_device(batch)
         metrics = {}
         total_loss = 0.0
 
         z_v = self.model.encode_visual(batch["image"])
-        z_s = self.model.encode_symbol(batch["tokens"])
+        z_s, per_cat = self.model.encode_symbol(batch["tokens"],
+                                                 return_per_category=True)
 
         if loss_weights["align"] > 0:
             l_align = self.loss_align(z_v, z_s)
@@ -280,6 +318,12 @@ class SAMTrainer:
                 total_loss += loss_weights["rel"] * l_rel
                 metrics["loss_rel"] = l_rel.item()
 
+        # Disentanglement: per-category orthogonality
+        if loss_weights.get("disentangle", 0) > 0 and per_cat:
+            l_disent = self._compute_disentangle(per_cat, batch["tokens"])
+            total_loss += loss_weights["disentangle"] * l_disent
+            metrics["loss_disentangle"] = l_disent.item()
+
         return total_loss, metrics
 
     def _analogy_step(self, batch, loss_weights):
@@ -289,8 +333,10 @@ class SAMTrainer:
 
         z_va = self.model.encode_visual(batch["img_a"])
         z_vb = self.model.encode_visual(batch["img_b"])
-        z_sa = self.model.encode_symbol(batch["sym_a"])
-        z_sb = self.model.encode_symbol(batch["sym_b"])
+        z_sa, per_cat_a = self.model.encode_symbol(batch["sym_a"],
+                                                     return_per_category=True)
+        z_sb, per_cat_b = self.model.encode_symbol(batch["sym_b"],
+                                                     return_per_category=True)
 
         if loss_weights["align"] > 0:
             l_align = (self.loss_align(z_va, z_sa) + self.loss_align(z_vb, z_sb)) / 2
@@ -306,6 +352,13 @@ class SAMTrainer:
             l_analogy = self.loss_analogy(z_va, z_vb, z_sa, z_sb)
             total_loss += loss_weights["analogy"] * l_analogy
             metrics["loss_analogy"] = l_analogy.item()
+
+        # Disentanglement on symbol embeddings
+        if loss_weights.get("disentangle", 0) > 0 and per_cat_a:
+            l_disent = (self._compute_disentangle(per_cat_a, batch["sym_a"]) +
+                        self._compute_disentangle(per_cat_b, batch["sym_b"])) / 2
+            total_loss += loss_weights["disentangle"] * l_disent
+            metrics["loss_disentangle"] = l_disent.item()
 
         return total_loss, metrics
 
