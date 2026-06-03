@@ -36,29 +36,29 @@ class VICRegLoss(nn.Module):
     def forward(self, z: torch.Tensor) -> dict[str, torch.Tensor]:
         """Compute VICReg penalties.
 
+        NOTE: variance loss is disabled by default for this architecture.
+        LayerNorm in per-category heads already enforces within-block variance.
+        Variance loss fights LayerNorm and can't win. Use cov + decoder instead.
+
         Args:
-            z: (B, D) manifold embeddings (can be pre- or post-normalization)
+            z: (B, D) manifold embeddings
 
         Returns:
             dict with 'var_loss', 'cov_loss', 'total_loss'
         """
         B, D = z.shape
 
-        # Variance regularization: prevent dimension collapse
-        # std(z, dim=0) measures how much each dimension varies across batch
-        std_z = torch.sqrt(z.var(dim=0) + 1e-8)
-        var_loss = F.relu(self.gamma - std_z).mean()
+        # Variance regularization: disabled — LayerNorm handles this
+        var_loss = torch.tensor(0.0, device=z.device)
 
         # Covariance regularization: decorrelate dimensions
-        # Off-diagonal elements of covariance matrix should be ~0
         z_centered = z - z.mean(dim=0)
         cov_z = (z_centered.T @ z_centered) / (B - 1)  # (D, D)
-        # Zero out diagonal — we only penalize off-diagonal
         diag = torch.diag(cov_z)
         cov_loss = (cov_z ** 2).sum() - (diag ** 2).sum()
-        cov_loss = cov_loss / D  # normalize by dimension count
+        cov_loss = cov_loss / D
 
-        total = self.var_weight * var_loss + self.cov_weight * cov_loss
+        total = self.cov_weight * cov_loss
         return {"var_loss": var_loss, "cov_loss": cov_loss, "total_loss": total}
 
 

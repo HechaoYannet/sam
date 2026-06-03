@@ -340,8 +340,8 @@ class SAMTrainer:
         total_loss = 0.0
 
         z_v = self.model.encode_visual(batch["image"])
-        z_s, per_cat, z_s_pre = self.model.encode_symbol(
-            batch["tokens"], return_per_category=True, return_pre_proj=True)
+        z_s, per_cat = self.model.encode_symbol(batch["tokens"],
+                                                 return_per_category=True)
 
         if loss_weights["align"] > 0:
             l_align = self.loss_align(z_v, z_s)
@@ -364,17 +364,17 @@ class SAMTrainer:
             total_loss += loss_weights["disentangle"] * l_disent
             metrics["loss_disentangle"] = l_disent.item()
 
-        # Wave 3: VICReg + Decoder scalable regularization
+        # Wave 3: VICReg covariance + Decoder (scalable regularization)
+        # NOTE: VICReg variance loss is disabled — LayerNorm handles variance.
+        # Covariance decorrelates dimensions on final manifold; decoder ensures
+        # all attribute info is preserved.
         if hasattr(self, 'regularizer'):
-            # VICReg variance on pre-projection (where L2 constraint doesn't limit variance)
-            # Covariance + Decoder on post-projection (normalized manifold)
             if self.use_vicreg:
-                vicreg_out = self.regularizer.vicreg(z_s_pre)
-                l_vicreg = vicreg_out["total_loss"]
-                total_loss += l_vicreg
-                metrics["loss_vicreg"] = l_vicreg.item()
-                metrics["loss_var"] = vicreg_out["var_loss"].item()
+                vicreg_out = self.regularizer.vicreg(z_s)
+                metrics["loss_vicreg"] = vicreg_out["total_loss"].item()
+                metrics["loss_var"] = 0.0  # disabled
                 metrics["loss_cov"] = vicreg_out["cov_loss"].item()
+                total_loss += vicreg_out["total_loss"]
             if self.use_decoder:
                 dec_out = self.regularizer.decoder(z_s, batch["tokens"])
                 l_dec = self.decoder_weight * dec_out["loss"]
