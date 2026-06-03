@@ -1,6 +1,6 @@
 # SAM Project — Progress & Handoff
 
-**Last updated:** 2026-06-03 15:30 | **Current phase:** Phase 2 Wave 1 complete → investigating manifold structure
+**Last updated:** 2026-06-03 | **Current phase:** Phase 2 Wave 2 Complete → Wave 3: Scalable Regularization
 
 ---
 
@@ -15,142 +15,114 @@ conda run -n tct python scripts/<script>.py
 
 ---
 
-## Phase 2 Wave 1 — Complete
+## Phase 2 Wave 2 — Complete: Architecture Diagnosis & Fix
 
-### Color Blindness Fix ✓
+### Key Findings (2026-06-03 Comprehensive Evaluation)
 
-**Previous hypothesis (ViT 192→256 projection) was WRONG.**
+**The "dimensionality collapse" narrative was misleading.** Effective rank ~10 is adequate for the task. The real issues were attribute imbalance and architectural flaws.
 
-True root cause: **symbol encoder MLP bottleneck (384→128→256)** destroyed color info.
-Per-category embeddings (64-dim) were well disentangled (cross-color cos ~0.1),
-but the 128-dim hidden layer forced 3:1 compression; model kept shape (rewarded by
-L_rel/L_analogy) and discarded color (no direct loss on full output).
+### Root Cause Chain (Confirmed)
 
-Also: `ColorContrastiveLoss` had inverted semantics — same-shape-diff-color was POSITIVE.
+```
+1. Old shared MLP (384→512→256): freely mixes all categories
+   → Strong-signal attribute (COL) invades weak-signal representation space
+2. SpectralNorm: σ_max grows during training → W/σ_max compresses ALL directions
+   → Positive feedback collapse (effective rank: 27 → 6)
+3. No structural constraints on final output
+   → Model finds minimal representation (~6-10 dim) sufficient for alignment loss
+```
 
-Three fixes applied:
-1. Fixed ColorContrastiveLoss: same-color-diff-shape = positive now
-2. Widened MLP: hidden_dim 128→512 (77K→299K params)
-3. New SymbolColorSeparationLoss: penalizes cosine >0.9 for same-shape-diff-color
+### Fixes Applied
 
-| Metric | P3 Baseline | After Fix | Target |
-|--------|------------|-----------|--------|
-| Cross-modal color Top-1 | 16.7% | **63.3%** | >50% ✓ |
-| Cross-modal color Top-3 | 53.3% | **80.0%** | — |
-| Cube color retrieval | 1/6 | **6/6** | >3/6 ✓ |
-| Symbol cross-color cosine (cube) | 0.992 | **0.262** | <0.95 ✓ |
-| L_align (final) | — | 0.206 | stable |
-| L_analogy (final) | — | 0.011 | preserved |
+| Fix | File | Effect |
+|-----|------|--------|
+| SpectralNorm → Orthogonal | `sam/manifold/projection.py` | Prevents rank collapse (all σ=1) |
+| MLP → Per-category heads (direct sum) | `sam/encoders/symbol.py` | Architecture-level attribute separation |
+| Removed per-attribute losses | deleted `color_contrastive.py`, `symbol_color.py`, `perturb.py`, `dimensionality.py` | Not scalable to real-world scenarios |
 
-### Wave 1 Remaining Gaps
+### Comprehensive Evaluation Results (v5b, 200 scenes / 100 analogies)
 
-**L_analogy Train/Val Gap:** 20.4x (val/train) — anti-shortcut scheduler DID NOT reduce gap (was 21x).
+| Experiment | Target | P3 (MLP+SN) | v4 (Heads+Ortho+GramCV) | v5b (Heads+Ortho+pcdr+attr) |
+|------------|--------|-------------|------------------------|----------------------------|
+| E1 Top1 test_ood | >70% | 24% | 54% | **76%** ✅ |
+| E1 IID-OOD Gap | <15% | +4% | +1% | **+1%** ✅ |
+| E2 mean_cos | >0.5 | 0.73 | 0.79 | **0.87** ✅ |
+| E2 RSA ρ | >0.3 | 0.61 | 0.65 | **0.83** ✅ |
+| E3 direct cosine | — | 0.87 | 0.75 | **0.83** (vector arithmetic works) |
+| E3 scene retrieval | >40% | 0% | 0% | **0%** ❌ (exact match infeasible) |
 
-**Full-Corpus Retrieval:** Replaced batch-64 E3 evaluation with 5075-candidate corpus:
+### Manifold Health (360-attribute grid)
 
-| Metric | Batch-64 | Full-Corpus (5075) |
-|--------|----------|-------------------|
-| Top-1 | 24.8% | **3.0%** |
-| Top-3 | 44.2% | **4.6%** |
-| Top-10 | — | **8.2%** |
+| Metric | P3 Baseline | v5b |
+|--------|-------------|-----|
+| Eff Rank | 6.0 | 10.3 |
+| OBJ variance | 4.0% (shape-blind!) | 39.7% |
+| COL variance | 62.2% (color-dominated) | 20.7% |
+| SIZE variance | 13.4% | 37.7% |
+| MAT variance | 0.3% | 0.2% |
+| Cross-category cos (OBJ-MAT) | 0.985 (identical!) | 0.731 |
+| MAT linear separability | 38.6% | 43.2% (random=25%, info IS encoded) |
 
-Batch-64 overestimates analogy by 8x. Full-corpus Top-10=8.2% (target >50%).
+**Critical insight:** MAT classification is 43.2% (well above random) despite 0.2% PCA variance. Information is encoded as subtle angular differences, not dominant principal components. **PCA variance ≠ information content.**
 
-### Per-Color Accuracy (fix model)
+### Cleanup Completed
 
-| Color | Accuracy | Main Confusion |
-|-------|----------|---------------|
-| Red | 80% | Orange |
-| Blue | 80% | Orange |
-| Green | 80% | Orange |
-| Yellow | 20% | Blue |
-| Purple | 80% | Orange |
-| Orange | 40% | Red, Blue |
-
-### Cross-Material Robustness (cube)
-
-Matte 100%, Shiny 100%, Metallic 83%, Glass 83%.
+Removed legacy files (wrong direction, incompatible with current architecture):
+- `sam/losses/color_contrastive.py`, `symbol_color.py`, `perturb.py`, `dimensionality.py`
+- `scripts/diagnose_dimensionality.py`, `validate_orthogonal_fix.py`, `test_orthogonal_train.py`
 
 ---
 
-## Manifold Structure Analysis (NEW — June 3)
+## Phase 2 Wave 3 — Current: Scalable Architecture & Analogy Fix
 
-### Critical Finding: Extreme Dimensionality Collapse
+### P0: Scalable Regularization (replaces per-attribute losses)
 
-**256-dim manifold uses only ~4-6 effective dimensions.**
+**Problem:** Per-attribute losses don't scale to real-world scenarios (hundreds of attributes, nested sub-attributes, cross-domain properties).
 
+**Approach:** VICReg-style global regularization + decoder bottleneck:
+- Variance regularization: prevent dimension collapse (global, no attribute knowledge needed)
+- Covariance regularization: decorrelate dimensions
+- Decoder bottleneck: small MLP reconstructs all attributes from embedding → information-theoretically forces preservation
+
+**Why this scales:** The loss doesn't need to know the list of attributes. The decoder learns to extract whatever information the embedding contains.
+
+### P1: Analogy Generalization Fix
+
+**Problem:** E3 train=62% vs test=14% (48pp gap) — model memorizes training analogies.
+
+**Root cause:** `scene_generator.py` generates analogies by randomly pairing unrelated scenes (img_a and img_b have no systematic relationship). The vector `img_b - img_a` is essentially noise.
+
+**Fix:** Generate STRUCTURED analogies where A and B share all but ONE attribute:
 ```
-PCA spectrum (360 symbol embeddings):
-  Dim 1: 29.9% variance
-  Dim 2: 25.8%
-  Dim 3: 22.0%
-  Dim 4: 18.9%
-  Dim 5:  2.4%  ← cliff
-  Dim 6:  0.9%
-  ...
-  Dim 7+: <0.01% each
-
-50% variance: 2 dims | 90%: 4 dims | 95%: 4 dims
-Participation ratio: 6.0 effective dims
+img_a: red cube + blue sphere (left_of)
+img_b: red cube + green sphere (left_of)  ← only sphere color changes
+sym_a → sym_b: change COL[sphere] from blue to green
 ```
+This forces the model to learn that analogy = single-attribute transformation.
 
-### Attribute Variance Distribution
+### P2: Continuous Attribute Space
 
-| Attribute | Variance | Notes |
-|-----------|----------|-------|
-| Color | **62.2%** | Dominates (was 0% before fix — reversal!) |
-| Size | 13.4% | Moderate |
-| Shape | **4.0%** | Shape almost lost! |
-| Material | 0.3% | Completely lost |
+Extend from discrete tokens to continuous-valued attributes:
+- RGB color encoding (small MLP: RGB → embedding)
+- Continuous size/position
+- Verify manifold smoothness: continuous attribute change → smooth trajectory on S^{255}
 
-### Where the Collapse Happens
+### P3: E3 Evaluation Redesign
 
-```
-Per-category (64-dim)   ✓  Perfect disentanglement, same-shape = same OBJ emb
-        ↓
-MLP (384→512→256)       ✓  Balanced category weights (20% each), eff rank 60+
-        ↓
-MLP output (pre-proj)   ✓  Color direction consistent across shapes (cos=0.976)
-        ↓
-ManifoldProjection      ⚠  SpectralNorm + LayerNorm + L2 normalize
-  (Linear 256→256)
-        ↓
-Final manifold output   ✗  4-6 effective dims, non-orthogonal attribute dirs
-```
+Replace "exact scene retrieval" (infeasible with 100+ candidates) with:
+- Per-attribute retrieval accuracy (predicted OBJ/COL/SIZE/MAT match truth?)
+- Displacement vector cosine with ground truth (already measured at 0.83)
+- Single-attribute-change analogy accuracy
 
-**The ManifoldProjection layer is where dimensionality collapses.** SpectralNorm limits singular values of the linear layer → if input has low effective rank, the projection can't "expand" into unused dimensions → LayerNorm + L2 normalize further compress.
+---
 
-### Color Direction Consistency (Across Shapes)
+## Architecture Decisions Record
 
-| Color pair | Cross-shape cos | Status |
-|------------|----------------|--------|
-| blue→yellow | 0.894 | ✓ Consistent |
-| red→orange | 0.849 | ✓ |
-| red→blue | 0.601 | ~ Marginal |
-| red→green | 0.452 | ✗ Inconsistent |
-| green→purple | 0.323 | ✗ Broken |
-
-Color directions are NOT a true vector field — analogy arithmetic fails when direction varies by shape.
-
-### Neighbor Purity (k=10)
-
-| Attribute | Purity | × Chance |
-|-----------|--------|----------|
-| Color | 84.3% | 5.1x |
-| Shape | 44.8% | 2.2x |
-| Pyramid color | **25%** | near random |
-
-### Why Attributes Can't Be Orthogonal
-
-Three-layer diagnosis:
-
-1. **Architecture**: MLP freely mixes categories. Per-cat embeddings are disentangled but the fully-connected projection combines them arbitrarily. No structural constraint preserves the direct sum M ≈ A_color ⊕ A_shape ⊕ ...
-
-2. **Geometry**: Unit sphere normalization adds minor coupling (pre-norm ratio=0.996), but the main issue is that with only 4-6 effective dims, there's no "room" for orthogonal subspaces. Need ~18 orthogonal dimensions for all attributes.
-
-3. **Loss**: L_disentangle only touches per-category embeddings (already good). No loss enforces subspace structure on the full output. L_align/L_rel/L_analogy work on collapsed space without penalty.
-
-**Hypothesis is NOT wrong — architecture provides zero mechanism to realize it.**
+1. **SpectralNorm → Orthogonal:** Training dynamics cause irreversible rank collapse. Orthogonal constraint ($W^T W = I$) is the necessary fix.
+2. **Shared MLP → Per-category heads (direct sum):** Shared parameters allow strong-signal attributes to invade weak-signal representation space. Direct sum is architecture-level prevention.
+3. **Per-attribute losses → Universal regularization:** Not scalable. VICReg + decoder bottleneck is the path forward.
+4. **"Dimension collapse" → "Attribute balance":** Effective rank ≠ information content. Focus on per-attribute decodability, not PCA spectrum.
+5. **256-dim manifold retained:** Only ~10 dim needed for current data, but capacity kept for continuous space and future extension.
 
 ---
 
@@ -160,51 +132,39 @@ Three-layer diagnosis:
 sam/
 ├── encoders/
 │   ├── visual.py              — ViT-Tiny (freeze L0-7)
-│   └── symbol.py              — Per-cat embed → MLP (512 hidden) → 256
+│   └── symbol.py              — Per-category heads + direct sum (v1.2)
 ├── manifold/
-│   └── projection.py          — SpectralNorm + LayerNorm + L2 (SUSPECT)
+│   └── projection.py          — Orthogonal parametrization (v1.2 fix)
 ├── losses/
-│   ├── color_contrastive.py   — Fixed: same-color-diff-shape positive
-│   ├── symbol_color.py        — NEW: penalizes color collapse in full output
-│   └── perturb.py             — Attribute perturbation regularization
+│   ├── align.py               — L_align: cross-modal InfoNCE
+│   ├── relational.py          — L_rel: displacement vector MSE
+│   ├── analogy.py             — L_analogy: vector arithmetic
+│   └── disentangle.py         — L_disentangle: cross-category orthogonality
 ├── data/
-│   └── balanced_sampler.py    — Color-balanced batch sampling
+│   ├── renderer.py            — 2D shape renderer
+│   ├── scene_generator.py     — Combinatorial split + scene/analogy generation
+│   └── dataset.py             — Scene/Analogy datasets
+├── trainer.py                 — 4-phase curriculum, TensorBoard, checkpoint
+└── config.py                  — DataConfig, ModelConfig, LossConfig, TrainConfig
+
 scripts/
-├── p2_wave1_train.py          — Wave 1 training (3-phase, 30 epochs)
-├── full_evaluation.py         — G1-G5 comprehensive eval suite
-├── wave1_completion.py        — Analogy gap + full-corpus retrieval
-├── analyze_manifold.py        — A1-A7 manifold structure analysis
-├── analyze_manifold_deep.py   — H1-H3 deep manifold diagnosis (partial)
-├── diagnose_color_root_cause.py    — Root cause investigation
-├── diagnose_shape_color_interaction.py — Shape-color interaction test
-└── test_challenge_images.py   — Real image inference
-docs/report/
-├── phase2_wave1_color_fix_report.md  — Complete fix report
-└── research_report.md                — Phase 1 research report
+├── generate_data.py           — Full dataset generation
+├── train.py                   — Training entry point
+├── comprehensive_eval.py      — Full E1/E2/E3 + manifold health evaluation
+├── diagnose_attribute_tradeoff.py — Per-attribute information analysis
+├── download_vit_weights.py    — ModelScope weight downloader
+├── monitor.py                 — AI training companion
+├── check_env.py               — Environment verification
+└── verify_gpu.py              — GPU forward pass + VRAM check
 ```
 
 ## Model Checkpoints
 
-| Path | Phase | Epoch | Notes |
-|------|-------|-------|-------|
-| `outputs/p3/checkpoint_best.pt` | P3 (4-loss) | 35 | Pre-fix baseline |
-| `outputs/p2_wave1/checkpoint_best.pt` | Wave 1 (old) | ~20 | Buggy color loss |
-| `outputs/p2_wave1_fix/checkpoint_epoch030.pt` | Wave 1 (fixed) | 30 | **CURRENT BEST** |
-
-## Next Session Priority
-
-**P0: Diagnose ManifoldProjection dimensionality collapse**
-- Analyze pre-proj vs post-proj PCA spectrum
-- Test if SpectralNorm suppresses dimension diversity
-- Try removing SpectralNorm and re-measuring effective dims
-
-**P1: Restore shape representation**
-- Color dominates 62% of variance, shape only 4%
-- Need balanced attribute subspace allocation
-
-**P2: Build structural direct-sum constraint**
-- Replace or augment MLP with per-category output heads
-- Add loss on full output that enforces subspace orthogonality
+| Path | Architecture | Epoch | E1 OOD | E2 RSA | Notes |
+|------|-------------|-------|--------|--------|-------|
+| `outputs/p2_wave1_fix/checkpoint_epoch030.pt` | MLP+SN | 30 | 24% | 0.61 | Old arch baseline |
+| `outputs/test_orthogonal_v4/checkpoint_epoch015.pt` | Heads+Ortho+GramCV | 15 | 54% | 0.65 | Global Gram CV |
+| `outputs/test_orthogonal_v5b/checkpoint_epoch015.pt` | Heads+Ortho+pcdr+attr | 15 | 76% | 0.83 | **Best current** |
 
 ## Environment
 
@@ -212,3 +172,4 @@ docs/report/
 - GPU: RTX 4060 Laptop 8GB
 - ViT weights: ModelScope `timm/vit_tiny_patch16_224.augreg_in21k_ft_in1k`
 - Use `conda run -n tct python` (NOT `conda activate`)
+- TensorBoard: `tensorboard --logdir <full_path_to_output_dir>/tensorboard`

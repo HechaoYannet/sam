@@ -101,13 +101,24 @@ $$E_v(I_{\text{red\_cube}}) - E_s(\text{"red"}) + E_s(\text{"blue"}) \approx E_v
 
 ### 2.3 符号编码器 $E_s$
 
+v1.2 采用**每类别独立输出头 + 直和结构**（经验证，共享 MLP 会导致属性坍缩）:
+
+```
+Per-cat embeddings (64-dim each)
+  → OBJ head: Linear(64→198→99) ─┐
+  → COL head: Linear(64→134→67) ─┤
+  → SIZE head: Linear(64→66→33)  ─┼─ concat → 256-dim direct sum
+  → MAT head: Linear(64→66→33)   ─┤
+  → REL head: Linear(64→48→24)   ─┘
+```
+
 | 项目 | 选择 | 理由 |
 |------|------|------|
-| 输入格式 | 结构化 token 序列 | v1 不做自然语言，保证编码器极简 |
-| Token 定义 | 见 §3.1 | 每个属性值有独立 token |
-| Embedding | Per-category embedding → sum pooling | 组合性由加法体现 |
-| MLP head | Linear(64→128→256) + LayerNorm | 轻量投影到流形 |
-| 参数总量 | ~1.5M | 极小，几乎不影响显存 |
+| 输入格式 | 结构化 token 序列 | v1 不做自然语言 |
+| Embedding | Per-category embedding (64-dim) | 组合性由加法体现 |
+| 输出头 | 每类别独立 MLP → concat (直和) | 架构级阻止跨类别侵占 |
+| 维度分配 | OBJ=99, COL=67, SIZE=33, MAT=33, REL=24 | 按类别信息量权重分配 |
+| 参数总量 | ~0.4M (比旧 MLP 少 4x) | 极轻量 |
 
 **符号输入例:**
 ```
@@ -116,29 +127,28 @@ $$E_v(I_{\text{red\_cube}}) - E_s(\text{"red"}) + E_s(\text{"blue"}) \approx E_v
 [OBJ:sphere] [COL:blue] [SIZE:small] [MAT:shiny]
 ```
 
-每个括号是一个 token，属性类别和属性值共享嵌入表。
-
 ### 2.4 流形投影层
-
-两个编码器共享一个**流形正则化层**:
 
 ```python
 class ManifoldProjection(nn.Module):
     def __init__(self, dim=256):
-        self.proj = nn.utils.parametrizations.spectral_norm(
+        self.proj = nn.utils.parametrizations.orthogonal(
             nn.Linear(dim, dim)
         )
         self.ln = nn.LayerNorm(dim)
     
     def forward(self, x):
-        # 将编码器输出正则化到单位超球面上
         return F.normalize(self.ln(self.proj(x)), dim=-1)
 ```
 
-投影到单位超球面 $S^{d-1}$ 有几个好处:
-- 训练更稳定（不会发散）
-- 距离自然变成角度距离
-- 流形结构更清晰（球面上的线性结构即大圆）
+**为什么用 Orthogonal 替代 SpectralNorm:**
+- SpectralNorm 训练时产生正反馈坍塌: 梯度放大任务方向 → σ_max 增大 → W/σ_max 压缩所有方向 → 有效秩崩溃
+- Orthogonal 强制 $W^T W = I$（所有奇异值 = 1），只做纯旋转，彻底阻止该机制
+- 代价: 失去缩放自由度，所有尺度调节必须在编码器内部完成
+
+投影到单位超球面 $S^{d-1}$ 的影响:
+- 训练稳定，距离 = 角度距离
+- **零和方差预算:** 球面上增加某属性方差必然压缩其他属性 — 这是属性失衡的几何根源
 
 ---
 
@@ -396,20 +406,52 @@ class ConstrainedManifold:
 
 ---
 
-## 8. 里程碑与交付
+## 8. 里程碑与交付 (v1.2 修正版)
 
-| 阶段 | 周期 | 核心任务 | 验收标准 |
+### 8.1 已完成
+
+| 阶段 | 状态 | 核心成果 |
+|------|------|---------|
+| **P0: 基建** | ✅ | 数据管线、ViT 编码器、训练框架、TensorBoard |
+| **P1: 对齐** | ✅ | 跨模态对齐 (E1 test_ood=76%, v5b) |
+| **P2: 关系** | ✅ | 关系一致性 (E2 RSA ρ=0.83, v5b) |
+| **P2.5: 诊断** | ✅ | 发现 SpectralNorm 坍缩、共享 MLP 属性侵占、修复为 Orthogonal + 直和头 |
+
+### 8.2 实际度量 (v5b, test_ood, 2026-06-03)
+
+| 实验 | 目标 | 实际 | 判定 |
+|------|------|------|------|
+| E1 组合泛化 Top1 | >70% | **76%** | ✅ |
+| E1 IID-OOD Gap | <15% | **1%** | ✅ |
+| E2 位移余弦 | >0.5 | **0.87** | ✅ |
+| E2 RSA ρ | >0.3 | **0.83** | ✅ |
+| E3 向量运算余弦 | — | **0.83** | 向量算术有效 |
+| E3 精确场景检索 | >40% | 0% | ❌ 需重新设计 |
+
+### 8.3 修正路线图
+
+**核心洞察:** "维度坍缩"是伪问题（有效秩 10 已足够）。真正要解决的是: (1) 属性解缠的可扩展机制，(2) E3 类比泛化，(3) 连续属性支持。
+
+| 波次 | 周期 | 核心任务 | 验收标准 |
 |------|------|---------|---------|
-| **P0: 基建** | W1 | 搭建代码框架；实现数据生成管线 | 能生成 20k 场景图 + 符号标注；单次 forward <4GB |
-| **P1: 对齐** | W2-W3 | 实现 E_v + E_s + L_align；单物体训练 | 单物体对齐准确率 > 90% |
-| **P2: 关系** | W4-W5 | 双物体场景；L_rel 训练；关系一致性验证 | E2 指标开始有正信号 (cos > 0.2) |
-| **P3: 类比** | W6-W7 | L_analogy 训练；全 loss 联合优化 | E1 组合泛化 > 60%, E3 类比 > 30% |
-| **P4: 评估** | W8-W9 | 完整评估三个实验；baseline 对比；可视化 | 产出完整指标报告 |
-| **P5: 写作** | W10-W12 | 失败分析；理论升华；撰写研究报告 | 可提交的论文初稿 + 开源代码 |
+| **W2: 架构稳固** | 当前 | 合并已验证修改；清理遗留代码；更新文档 | 代码干净，单次 forward <4GB |
+| **W3: 可扩展正则化** | 1-2周 | 用 VICReg 风格损失替代 per-attribute losses；实现解码器瓶颈（从嵌入重建全部属性）| 不依赖属性列表即可维持所有属性的可解码性 |
+| **W4: 类比修复** | 1-2周 | 诊断 E3 train→test gap (62%→14%)；修复类比数据生成（当前只是随机配对）；设计结构化类比（单属性变化）| E3 场景检索 >20% |
+| **W5: 连续空间** | 1-2周 | RGB 连续颜色编码；连续位置/大小；验证流形平滑性 | 连续属性变化对应流形上平滑轨迹 |
+| **W6: 完整评估** | 1周 | 全指标报告；CLIP baseline 对比；失败案例分析 | 产出完整指标报告 |
+| **W7+: 扩展** | 后续 | 自然语言符号；文本解码器；真实图像 | — |
+
+### 8.4 关键架构决策记录
+
+1. **SpectralNorm → Orthogonal:** 训练动力学导致不可逆的秩坍缩，Orthogonal 是必要修复
+2. **共享 MLP → 直和头:** 共享参数允许强信号属性侵占弱信号属性的表示空间
+3. **Per-attribute loss → 通用正则化:** 不可扩展，需替换为 VICReg/decoder 等通用机制
+4. **"维度坍缩"叙事 → "属性平衡"叙事:** 有效秩 ≠ 信息量。MAT 分类 43% 但 PCA 方差仅 0.2% — 信息以微妙角度差异编码
+5. **256-dim 流形保留:** 虽然当前数据只需 ~10 dim，但保留作为连续空间和未来扩展的容量
 
 ---
 
-## 9. 代码结构
+## 9. 代码结构 (v1.2)
 
 ```text
 mm-jepa/
@@ -424,16 +466,16 @@ mm-jepa/
 │   ├── encoders/
 │   │   ├── __init__.py
 │   │   ├── visual.py               # ViT-Tiny 视觉编码器
-│   │   └── symbol.py               # 结构化符号编码器
+│   │   └── symbol.py               # 符号编码器 (per-category heads + 直和)
 │   ├── manifold/
 │   │   ├── __init__.py
-│   │   └── projection.py           # 流形投影 + 正则化
+│   │   └── projection.py           # 流形投影 (Orthogonal, 非 SpectralNorm)
 │   ├── losses/
 │   │   ├── __init__.py
-│   │   ├── align.py                # L_align
-│   │   ├── relational.py           # L_rel
-│   │   ├── analogy.py              # L_analogy
-│   │   └── disentangle.py          # L_disentangle
+│   │   ├── align.py                # L_align: 跨模态对齐 + InfoNCE
+│   │   ├── relational.py           # L_rel: 关系一致性 (位移向量 MSE)
+│   │   ├── analogy.py              # L_analogy: 类比完成 (向量运算)
+│   │   └── disentangle.py          # L_disentangle: 跨类别正交性
 │   ├── data/
 │   │   ├── __init__.py
 │   │   ├── renderer.py             # 2D 程序化渲染
@@ -448,11 +490,17 @@ mm-jepa/
 ├── scripts/
 │   ├── generate_data.py            # 数据生成入口
 │   ├── train.py                    # 训练入口
-│   └── eval.py                     # 评估入口
-├── notebooks/
-│   └── analysis.ipynb              # 可视化分析
+│   ├── comprehensive_eval.py       # 全面评估 (E1/E2/E3 + 流形健康)
+│   ├── diagnose_attribute_tradeoff.py  # 属性权衡诊断
+│   ├── download_vit_weights.py     # ViT 权重下载 (ModelScope)
+│   ├── check_env.py                # 环境检查
+│   ├── verify_gpu.py               # GPU 验证
+│   └── monitor.py                  # 训练监控助手
+├── outputs/                         # 训练输出 (checkpoints, tensorboard, logs)
 ├── requirements.txt
 ├── .gitignore
+├── CLAUDE.md
+├── PROGRESS.md
 └── README.md
 ```
 

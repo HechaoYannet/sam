@@ -4,13 +4,24 @@ import torch.nn.functional as F
 
 
 class SymbolEncoder(nn.Module):
-    """Structured symbol encoder with per-category embeddings.
+    """Structured symbol encoder with per-category embeddings and output heads.
 
-    Tokens for each category are embedded separately, then summed across
-    categories and objects to produce a single manifold point.
-    This design naturally supports compositionality: the representation
-    of a scene is the sum of its attribute vectors.
+    Each category gets its own dedicated output subspace (direct sum structure),
+    preventing the MLP from freely mixing categories and collapsing dimensions.
+
+    Output allocation (256 dims total):
+      OBJ:  96  — shape identity (richest subspace)
+      COL:  64  — color
+      SIZE: 32  — size
+      MAT:  32  — material
+      REL:  16  — spatial relations
+      PAD:  16  — padding token
     """
+
+    # Per-category output allocation weights (relative, will be normalized to 256)
+    _CATEGORY_WEIGHTS = {
+        'OBJ': 12, 'COL': 8, 'SIZE': 4, 'MAT': 4, 'REL': 3, 'PAD': 1,
+    }
 
     def __init__(self, cat_sizes: dict[str, int], embed_dim: int = 64,
                  hidden_dim: int = 512, manifold_dim: int = 256):
@@ -24,15 +35,31 @@ class SymbolEncoder(nn.Module):
             self.embeddings[cat] = nn.Embedding(vocab_size, embed_dim,
                                                  padding_idx=vocab_size - 1)
 
-        total_embed_dim = len(cat_sizes) * embed_dim
+        # Dynamically allocate output dims proportional to category weights
+        cats_sorted = sorted(cat_sizes.keys())
+        weights = [self._CATEGORY_WEIGHTS.get(c, 1) for c in cats_sorted]
+        total_w = sum(weights)
+        # Distribute manifold_dim proportionally, ensure each gets at least 8
+        allocations = [max(8, int(manifold_dim * w / total_w)) for w in weights]
+        # Adjust to exactly match manifold_dim
+        diff = manifold_dim - sum(allocations)
+        for i in range(abs(diff)):
+            allocations[i % len(allocations)] += 1 if diff > 0 else -1
 
-        self.projection = nn.Sequential(
-            nn.Linear(total_embed_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, manifold_dim),
-            nn.LayerNorm(manifold_dim),
-        )
+        self.heads = nn.ModuleDict()
+        self._cat_allocations = {}
+        for cat, alloc in zip(cats_sorted, allocations):
+            self._cat_allocations[cat] = alloc
+            self.heads[cat] = nn.Sequential(
+                nn.Linear(embed_dim, alloc * 2),
+                nn.LayerNorm(alloc * 2),
+                nn.ReLU(),
+                nn.Linear(alloc * 2, alloc),
+                nn.LayerNorm(alloc),
+            )
+
+        assert sum(allocations) == manifold_dim, \
+            f"Allocation sum {sum(allocations)} != {manifold_dim}"
 
     def forward(self, tokens: dict[str, torch.Tensor],
                 return_per_category: bool = False):
@@ -41,28 +68,34 @@ class SymbolEncoder(nn.Module):
         Args:
             tokens: Dict mapping category -> LongTensor of shape (B, N_objects)
             return_per_category: if True, also returns raw per-category embeddings
-                as a dict of {category_name: (B, embed_dim)} for disentanglement.
-                These are the pre-pooling raw embedding vectors (no extra parameters).
 
         Returns:
             z: (B, manifold_dim) manifold embeddings
             per_cat: (only if return_per_category=True) dict of per-category vectors
         """
-        per_cat_raw = {}  # per-category embeddings before projection
-        for cat, emb_layer in self.embeddings.items():
+        per_cat_raw = {}
+        parts = []
+
+        for cat in sorted(self.embeddings.keys()):
+            head = self.heads[cat]
+            emb_layer = self.embeddings[cat]
+
             if cat in tokens:
                 cat_indices = tokens[cat]
                 cat_emb = emb_layer(cat_indices)
-                cat_emb = cat_emb.mean(dim=1)
-                per_cat_raw[cat] = cat_emb
+                if cat_emb.dim() == 3:  # (B, N_objects, D) → pool over objects
+                    cat_emb = cat_emb.mean(dim=1)
+                # else: (B, D) — already correct, no pooling needed
+            else:
+                # Missing category: use padding (last index)
+                pad_idx = emb_layer.weight.shape[0] - 1
+                cat_emb = emb_layer.weight[pad_idx].unsqueeze(0)
 
-        # Build combined embedding
-        combined_list = [per_cat_raw[cat] for cat in sorted(per_cat_raw.keys())]
-        combined = torch.cat(combined_list, dim=-1)
-        z = self.projection(combined)
+            per_cat_raw[cat] = cat_emb
+            parts.append(head(cat_emb))
+
+        z = torch.cat(parts, dim=-1)
 
         if return_per_category:
-            # Return raw per-category embeddings (64-dim) for disentanglement.
-            # No extra parameters — disentanglement works on raw embedding vectors.
             return z, {cat: emb for cat, emb in per_cat_raw.items()}
         return z

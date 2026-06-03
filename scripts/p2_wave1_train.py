@@ -12,7 +12,6 @@ Usage:
 
 import argparse, json, sys, time
 from pathlib import Path
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -32,9 +31,6 @@ from sam.data.balanced_sampler import ColorBalancedSampler
 from sam.losses.align import AlignmentLoss
 from sam.losses.relational import RelationalConsistencyLoss
 from sam.losses.analogy import AnalogyLoss
-from sam.losses.color_contrastive import ColorContrastiveLoss
-from sam.losses.symbol_color import SymbolColorSeparationLoss
-from sam.losses.perturb import PerturbationLoss
 
 
 # ---------------------------------------------------------------------------
@@ -65,16 +61,13 @@ class AntiShortcutScheduler:
     def get_loss_weights(self, phase):
         if phase == "recovery":
             return {"align": 0.3, "rel": 1.0, "analogy": 0.0,
-                    "disentangle": 0.0, "color_contrast": 0.5,
-                    "sym_color": 0.3, "perturb": 0.0}
+                    "disentangle": 0.0}
         elif phase == "analogy":
             return {"align": 0.1, "rel": 0.5, "analogy": 2.0,
-                    "disentangle": 0.1, "color_contrast": 0.3,
-                    "sym_color": 0.3, "perturb": 0.3}
+                    "disentangle": 0.1}
         else:  # joint
             return {"align": 0.5, "rel": 1.0, "analogy": 1.0,
-                    "disentangle": 0.1, "color_contrast": 0.2,
-                    "sym_color": 0.2, "perturb": 0.0}
+                    "disentangle": 0.1}
 
     def total_epochs(self):
         return self.boundaries["joint"][1]
@@ -90,14 +83,6 @@ def to_device(obj, device):
     elif isinstance(obj, dict):
         return {k: to_device(v, device) for k, v in obj.items()}
     return obj
-
-
-def get_shape_color_ids(batch, cat_to_idx):
-    """Extract shape and color indices from token batch."""
-    tokens = batch["tokens"]
-    shape_ids = tokens["OBJ"][:, 0]  # (B,) first object's shape
-    color_ids = tokens["COL"][:, 0]  # (B,) first object's color
-    return shape_ids, color_ids
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +199,6 @@ def main():
     loss_align = AlignmentLoss(temperature=0.07)
     loss_rel = RelationalConsistencyLoss()
     loss_analogy = AnalogyLoss()
-    loss_color = ColorContrastiveLoss(temperature=0.1)
-    loss_sym_color = SymbolColorSeparationLoss(margin=0.9)
-    loss_perturb = PerturbationLoss(perturb_prob=0.3, margin=0.5)
 
     # Optimizer (fresh — don't load optimizer state from P3)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
@@ -224,7 +206,6 @@ def main():
         optimizer, T_max=total_epochs, eta_min=1e-6,
     )
 
-    rng = np.random.RandomState(42)
     best_val = float("inf")
 
     print(f"\n{'='*60}")
@@ -237,8 +218,7 @@ def main():
         model.train()
         t0 = time.time()
 
-        metrics = {"loss_align": 0, "loss_rel": 0, "loss_analogy": 0,
-                    "loss_color": 0, "loss_sym_color": 0, "loss_perturb": 0}
+        metrics = {"loss_align": 0, "loss_rel": 0, "loss_analogy": 0}
         n_batches = 0
 
         # Create analogy iterator
@@ -269,22 +249,6 @@ def main():
                     total_loss = total_loss + weights["rel"] * lr_
                     metrics["loss_rel"] += lr_.item()
 
-            # --- L_color-contrast ---
-            if weights["color_contrast"] > 0:
-                shape_ids, color_ids = get_shape_color_ids(batch, cat_to_idx)
-                lc = loss_color(z_v, shape_ids, color_ids)
-                if lc.item() > 0:
-                    total_loss = total_loss + weights["color_contrast"] * lc
-                    metrics["loss_color"] += lc.item()
-
-            # --- L_sym-color-separation (on symbol full output) ---
-            if weights["sym_color"] > 0:
-                shape_ids, color_ids = get_shape_color_ids(batch, cat_to_idx)
-                lsc = loss_sym_color(z_s, shape_ids, color_ids)
-                if lsc.item() > 0:
-                    total_loss = total_loss + weights["sym_color"] * lsc
-                    metrics["loss_sym_color"] += lsc.item()
-
             # --- Analogy step (interleaved) ---
             if analogy_iter and weights["analogy"] > 0:
                 try:
@@ -305,40 +269,6 @@ def main():
                 la_ = loss_analogy(z_va, z_vb, z_sa, z_sb)
                 total_loss = total_loss + weights["analogy"] * la_
                 metrics["loss_analogy"] += la_.item()
-
-                # L_sym-color-separation on analogy symbols
-                if weights["sym_color"] > 0:
-                    shape_a = a_batch["sym_a"]["OBJ"][:, 0]
-                    color_a = a_batch["sym_a"]["COL"][:, 0]
-                    shape_b = a_batch["sym_b"]["OBJ"][:, 0]
-                    color_b = a_batch["sym_b"]["COL"][:, 0]
-                    lsc_a = loss_sym_color(z_sa, shape_a, color_a)
-                    lsc_b = loss_sym_color(z_sb, shape_b, color_b)
-                    lsc = (lsc_a + lsc_b) / 2
-                    if lsc.item() > 0:
-                        total_loss = total_loss + weights["sym_color"] * lsc
-                        metrics["loss_sym_color"] += lsc.item()
-
-                # L_perturb: penalize alignment shortcut
-                if weights["perturb"] > 0:
-                    p_mask, p_tokens = loss_perturb(
-                        z_vb, z_va, z_sa, z_sb, a_batch["sym_a"],
-                        cat_sizes, rng=rng,
-                    )
-                    # Re-encode perturbed symbols
-                    z_sa_perturbed = model.encode_symbol(p_tokens)
-                    # If model still predicts S_B well with perturbed S_A,
-                    # that's the shortcut — penalize it
-                    z_pred_perturbed = z_vb - z_va + z_sa_perturbed
-                    z_pred_perturbed = torch.nn.functional.normalize(
-                        z_pred_perturbed, dim=-1)
-                    cos_perturbed = (z_pred_perturbed * z_sb).sum(dim=-1)
-                    # Penalize when cosine exceeds margin
-                    violation = torch.clamp(
-                        cos_perturbed - loss_perturb.margin, min=0)
-                    lp = violation.mean()
-                    total_loss = total_loss + weights["perturb"] * lp
-                    metrics["loss_perturb"] += lp.item()
 
             # Backward
             optimizer.zero_grad()
@@ -361,7 +291,7 @@ def main():
         val_metrics = {}
         if epoch % 5 == 0 or epoch == total_epochs:
             model.eval()
-            val_losses = {"val_align": 0, "val_color": 0}
+            val_losses = {"val_align": 0}
             n_val = 0
             with torch.no_grad():
                 for batch in scene_val_loader:
@@ -369,10 +299,6 @@ def main():
                     zv = model.encode_visual(batch["image"])
                     zs = model.encode_symbol(batch["tokens"])
                     val_losses["val_align"] += loss_align(zv, zs).item()
-                    shape_ids, color_ids = get_shape_color_ids(batch, cat_to_idx)
-                    lc = loss_color(zv, shape_ids, color_ids)
-                    if lc.item() > 0:
-                        val_losses["val_color"] += lc.item()
                     n_val += 1
             for k in val_losses:
                 val_metrics[k] = val_losses[k] / max(n_val, 1)

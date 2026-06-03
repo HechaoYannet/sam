@@ -8,7 +8,7 @@ class ManifoldProjection(nn.Module):
 
     def __init__(self, dim: int = 256):
         super().__init__()
-        self.proj = nn.utils.parametrizations.spectral_norm(
+        self.proj = nn.utils.parametrizations.orthogonal(
             nn.Linear(dim, dim)
         )
         self.ln = nn.LayerNorm(dim)

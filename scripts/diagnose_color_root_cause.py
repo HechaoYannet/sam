@@ -1,10 +1,12 @@
 """Comprehensive color blindness root cause diagnosis.
 
 Tests multiple hypotheses by tracing color signal through each layer:
-  H1: ColorContrastiveLoss has wrong positive/negative definition
   H2: L_disentangle competes with stronger losses (stuck near 0.5)
   H3: Color info is lost at a specific projection layer
   H4: ViT fine-tuning destroys color sensitivity (tested separately)
+
+Note: H1 (ColorContrastiveLoss semantics) was tested in a previous iteration.
+      The color_contrastive loss module has been removed; H1 is no longer tested here.
 """
 
 import torch
@@ -19,7 +21,6 @@ from sam.encoders.visual import VisualEncoder
 from sam.encoders.symbol import SymbolEncoder
 from sam.manifold.projection import ManifoldProjection
 from sam.data.dataset import build_vocabs, tokenize
-from sam.losses.color_contrastive import ColorContrastiveLoss
 from sam.data.renderer import COLOR_MAP
 from torchvision import transforms
 from PIL import Image
@@ -152,69 +153,6 @@ def color_separability_metric(embeddings_dict):
     }
 
 
-def diagnose_colorcontrastive_loss():
-    """H1: Verify ColorContrastiveLoss sign/semantics."""
-    print("=" * 60)
-    print("H1: ColorContrastiveLoss semantics check")
-    print("=" * 60)
-
-    loss_fn = ColorContrastiveLoss(temperature=0.1)
-
-    # Simulate a batch with 2 shapes × 3 colors each
-    # shape 0 (cube): red, blue, green → shape_ids [0,0,0]
-    # shape 1 (sphere): red, blue, green → shape_ids [1,1,1]
-    shape_ids = torch.tensor([0, 0, 0, 1, 1, 1])
-    color_ids = torch.tensor([0, 1, 2, 0, 1, 2])
-
-    # Test 1: What happens when all same-shape embeddings are identical?
-    # (current model behavior — shape dominates, color ignored)
-    # Create 2 clusters: all cubes at [1,0], all spheres at [-1,0]
-    z_collapsed = torch.zeros(6, 256)
-    z_collapsed[:3] = torch.tensor([1.0] + [0.0] * 255)  # all cubes same
-    z_collapsed[3:] = torch.tensor([-1.0] + [0.0] * 255)  # all spheres same
-    z_collapsed = z_collapsed / z_collapsed.norm(dim=1, keepdim=True)
-
-    loss_collapsed = loss_fn(z_collapsed, shape_ids, color_ids)
-
-    # Test 2: What happens when colors are well-separated?
-    # Each (shape, color) pair has unique embedding
-    z_separated = torch.randn(6, 256)
-    z_separated = z_separated / z_separated.norm(dim=1, keepdim=True)
-    loss_separated = loss_fn(z_separated, shape_ids, color_ids)
-
-    print(f"Loss when colors collapsed (all cubes same): {loss_collapsed.item():.4f}")
-    print(f"Loss when colors separated (unique):       {loss_separated.item():.4f}")
-
-    if loss_collapsed < loss_separated:
-        print(">>> BUG CONFIRMED: Loss PREFERS color collapse!")
-        print("    Same-shape-diff-color treated as POSITIVE → pulls them together.")
-    else:
-        print(">>> Loss correctly penalizes color collapse.")
-
-    # Test 3: Gradient direction check
-    print("\nGradient direction check:")
-    z_test = torch.randn(6, 256, requires_grad=True)
-    z_test_norm = z_test / z_test.norm(dim=1, keepdim=True)
-    l = loss_fn(z_test_norm, shape_ids, color_ids)
-    l.backward()
-
-    # For anchor 0 (red cube), check gradient direction vs blue cube (#1) and red sphere (#3)
-    grad = z_test.grad  # (6, 256)
-    cos_01 = torch.nn.functional.cosine_similarity(
-        grad[0:1], z_test_norm[1:2].detach()).item()
-    cos_03 = torch.nn.functional.cosine_similarity(
-        grad[0:1], z_test_norm[3:4].detach()).item()
-
-    print(f"Cosine(grad[red_cube], embedding[blue_cube]):  {cos_01:.4f}")
-    print(f"Cosine(grad[red_cube], embedding[red_sphere]): {cos_03:.4f}")
-    if cos_01 < 0 and cos_03 > 0:
-        print(">>> Gradient pushes red_cube TOWARD blue_cube, AWAY from red_sphere")
-        print("    This REINFORCES shape-based clustering at expense of color.")
-    elif cos_01 > 0 and cos_03 < 0:
-        print(">>> Gradient pushes red_cube AWAY from blue_cube, TOWARD red_sphere")
-        print("    This would ENCOURAGE color-based clustering.")
-
-    return loss_collapsed.item() < loss_separated.item()
 
 
 def diagnose_layerwise_color_signal(model, transform, device):
@@ -415,7 +353,6 @@ def main():
     ])
 
     # --- Run diagnostics ---
-    h1_bug = diagnose_colorcontrastive_loss()
     layer_data = diagnose_layerwise_color_signal(model, transform, device)
     diagnose_disentanglement(model, cat_to_idx, device)
 
@@ -423,12 +360,6 @@ def main():
     print("\n" + "=" * 60)
     print("DIAGNOSIS SUMMARY")
     print("=" * 60)
-
-    if h1_bug:
-        print("H1 [CONFIRMED]: ColorContrastiveLoss has wrong semantics.")
-        print("    Same-shape-diff-color = POSITIVE → pulls colors together.")
-        print("    Fix: Invert mask so same-color-diff-shape = positive,")
-        print("         OR same-shape-diff-color = negative (push apart).")
 
     # Check layer-wise color drop
     vit_metrics = color_separability_metric(layer_data["vit_cls"])
