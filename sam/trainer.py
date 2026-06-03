@@ -340,8 +340,8 @@ class SAMTrainer:
         total_loss = 0.0
 
         z_v = self.model.encode_visual(batch["image"])
-        z_s, per_cat = self.model.encode_symbol(batch["tokens"],
-                                                 return_per_category=True)
+        z_s, per_cat, z_s_pre = self.model.encode_symbol(
+            batch["tokens"], return_per_category=True, return_pre_proj=True)
 
         if loss_weights["align"] > 0:
             l_align = self.loss_align(z_v, z_s)
@@ -366,20 +366,23 @@ class SAMTrainer:
 
         # Wave 3: VICReg + Decoder scalable regularization
         if hasattr(self, 'regularizer'):
-            reg_out = self.regularizer(z_s, batch["tokens"])
+            # VICReg variance on pre-projection (where L2 constraint doesn't limit variance)
+            # Covariance + Decoder on post-projection (normalized manifold)
             if self.use_vicreg:
-                l_vicreg = reg_out["total_loss"]
+                vicreg_out = self.regularizer.vicreg(z_s_pre)
+                l_vicreg = vicreg_out["total_loss"]
                 total_loss += l_vicreg
                 metrics["loss_vicreg"] = l_vicreg.item()
-                metrics["loss_var"] = reg_out["var_loss"].item()
-                metrics["loss_cov"] = reg_out["cov_loss"].item()
+                metrics["loss_var"] = vicreg_out["var_loss"].item()
+                metrics["loss_cov"] = vicreg_out["cov_loss"].item()
             if self.use_decoder:
-                l_dec = self.decoder_weight * reg_out["loss"]
+                dec_out = self.regularizer.decoder(z_s, batch["tokens"])
+                l_dec = self.decoder_weight * dec_out["loss"]
                 total_loss += l_dec
                 metrics["loss_decoder"] = l_dec.item()
                 for cat in self.cat_sizes:
-                    if f"acc_{cat}" in reg_out:
-                        metrics[f"dec_acc_{cat}"] = reg_out[f"acc_{cat}"].item()
+                    if f"acc_{cat}" in dec_out:
+                        metrics[f"dec_acc_{cat}"] = dec_out[f"acc_{cat}"].item()
 
         return total_loss, metrics
 

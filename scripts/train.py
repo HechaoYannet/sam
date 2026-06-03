@@ -61,10 +61,11 @@ def build_loaders(cfg, cat_to_idx, single_meta, scenes_meta, analogy_meta):
     train_kwargs = dict(
         num_workers=cfg.train.num_workers,
         pin_memory=cfg.train.pin_memory,
-        prefetch_factor=cfg.train.prefetch_factor,
-        persistent_workers=True,
         collate_fn=collate_fn,
     )
+    if cfg.train.num_workers > 0:
+        train_kwargs['prefetch_factor'] = cfg.train.prefetch_factor
+        train_kwargs['persistent_workers'] = True
     eval_kwargs = dict(
         num_workers=cfg.train.num_workers,
         pin_memory=cfg.train.pin_memory,

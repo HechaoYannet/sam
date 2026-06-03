@@ -94,8 +94,8 @@ class TrainConfig:
 
     # Precision
     use_amp: bool = True   # bfloat16
-    num_workers: int = 4
-    pin_memory: bool = True
+    num_workers: int = 0  # 0 = main process only, avoids fork memory overhead
+    pin_memory: bool = False  # disabled for num_workers=0
     prefetch_factor: int = 2
 
     # Logging
