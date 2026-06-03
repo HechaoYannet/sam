@@ -515,9 +515,9 @@ def main():
 
     # Checkpoints to evaluate
     checkpoints = {
+        "v7_vicreg_ep060": "outputs/v7_vicreg_decoder/checkpoint_epoch060.pt",
+        "v7_vicreg_ep030": "outputs/v7_vicreg_decoder/checkpoint_epoch030.pt",
         "v6_baseline_ep060": "outputs/v6_baseline/checkpoint_epoch060.pt",
-        "P3_baseline_ep030": "outputs/p2_wave1_fix/checkpoint_epoch030.pt",
-        "v5b_heads_pcdr_attr_ep015": "outputs/test_orthogonal_v5b/checkpoint_epoch015.pt",
     }
 
     all_results = {}
