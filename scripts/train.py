@@ -113,6 +113,14 @@ def main():
                         help="Resume from checkpoint. 'auto' finds latest, or specify path.")
     parser.add_argument("--no_amp", action="store_true",
                         help="Disable automatic mixed precision")
+    parser.add_argument("--vicreg", action="store_true",
+                        help="Enable VICReg variance/covariance regularization")
+    parser.add_argument("--decoder", action="store_true",
+                        help="Enable decoder bottleneck (attribute reconstruction)")
+    parser.add_argument("--decoder_weight", type=float, default=0.5,
+                        help="Decoder loss weight")
+    parser.add_argument("--vicreg_var_weight", type=float, default=0.5)
+    parser.add_argument("--vicreg_cov_weight", type=float, default=0.5)
     args = parser.parse_args()
 
     cfg = Config()
@@ -120,6 +128,13 @@ def main():
     cfg.train.epochs = args.epochs
     if args.no_amp:
         cfg.train.use_amp = False
+    if args.vicreg:
+        cfg.loss.use_vicreg = True
+        cfg.loss.vicreg_var_weight = args.vicreg_var_weight
+        cfg.loss.vicreg_cov_weight = args.vicreg_cov_weight
+    if args.decoder:
+        cfg.loss.use_decoder = True
+        cfg.loss.decoder_weight = args.decoder_weight
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
