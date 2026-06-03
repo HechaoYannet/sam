@@ -53,8 +53,8 @@ python scripts/train.py --data_dir data/test_mini --output_dir outputs/test_run 
 
 ## Design Documents
 
-- `dosc/design/architecture.md` — authoritative architecture spec. Read this first before any implementation work.
-- `dosc/plan/initial_plan.md` — archived original MM-JEPA physics-prediction plan. Historical reference only.
+- `docs/design/architecture.md` — authoritative architecture spec. Read this first before any implementation work.
+- `docs/plan/initial_plan.md` — archived original MM-JEPA physics-prediction plan. Historical reference only.
 
 ## Key Architecture Constraints (from design doc)
 

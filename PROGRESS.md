@@ -146,10 +146,10 @@ Full 30-epoch training in progress.
 
 ## Design Docs
 
-- `dosc/design/architecture.md` — Phase 1 architecture (complete)
-- `dosc/design/architecture_phase2.md` — Phase 2 architecture (design only)
-- `dosc/report/research_report.md` — Full research report
-- `dosc/paper/phase1_paper.md` — Phase 1 paper draft
+- `docs/design/architecture.md` — Phase 1 architecture (complete)
+- `docs/design/architecture_phase2.md` — Phase 2 architecture (design only)
+- `docs/report/research_report.md` — Full research report
+- `docs/paper/phase1_paper.md` — Phase 1 paper draft
 
 ## Environment
 

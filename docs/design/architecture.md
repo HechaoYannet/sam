@@ -413,7 +413,7 @@ class ConstrainedManifold:
 
 ```text
 mm-jepa/
-├── dosc/
+├── docs/
 │   ├── plan/
 │   │   └── initial_plan.md          # 原始计划 (archived)
 │   └── design/
