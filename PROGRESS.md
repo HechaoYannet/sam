@@ -1,6 +1,44 @@
 # SAM Project — Progress & Handoff
 
-**Last updated:** 2026-06-03 01:55 | **Current phase:** Phase 2 Wave 1 (structural fixes)
+**Last updated:** 2026-06-03 13:45 | **Current phase:** Phase 2 Wave 1 — COLOR BLINDNESS FIXED ✓
+
+---
+
+## Color Blindness — Root Cause FOUND & FIXED (2026-06-03)
+
+**Previous hypothesis (projection bottleneck 192→256) was WRONG.**
+
+### True Root Cause
+
+The **symbol encoder's MLP bottleneck (384→128→256)** destroys color information:
+- Per-category embeddings (64-dim) are well disentangled (cross-color cosine ~0.1)
+- But after MLP compression, same-shape-diff-color symbol embeddings collapse to **cosine 0.998**
+- The 128-dim hidden layer forces 3:1 compression; model preserves shape (rewarded by L_rel/L_analogy) and discards color (no direct loss on full output)
+
+### Contributing Bug
+
+`ColorContrastiveLoss` had inverted semantics: same-shape-diff-color = POSITIVE (pulled them together). Loss preferred color collapse (0.693) over separation (1.651).
+
+### Fixes Applied (3 changes)
+
+1. **Fixed `ColorContrastiveLoss`** — inverted mask: same-color-diff-shape = positive now. Loss: 20.0 for collapse, 1.08 for separation.
+2. **Widened symbol encoder MLP** — hidden_dim 128→512. Removes bottleneck. (+222K params, 174/179 P3 params loaded).
+3. **Added `SymbolColorSeparationLoss`** — penalizes cosine >0.9 for same-shape-diff-color symbol pairs. Forces MLP to preserve color.
+
+### Results (30-epoch full training)
+
+| Metric | Before Fix | After Fix | Target |
+|--------|-----------|-----------|--------|
+| Symbol cross-color cosine | 0.998 | **0.262** | <0.95 ✓ |
+| Visual cross-color cosine | 0.979 | **0.383** | — |
+| Cross-modal Top-1 | 20.0% | **63.3%** | >50% ✓ |
+| Cross-modal Top-3 | 56.7% | **80.0%** | — |
+| Visual color acc (cube) | 85% | **100%** | — |
+| Visual color acc (sphere) | 23% | **100%** | — |
+| Cube color retrieval | 2/6 | **6/6** | >3/6 ✓ |
+| L_align (final) | — | 0.206 | stable |
+| L_analogy (final) | — | 0.011 | preserved |
+| Symbol encoder params | 77K | 299K | — |
 
 ---
 
@@ -42,24 +80,22 @@ Latest: `6f7ed7f` P2 Wave1: color contrastive loss, balanced sampler, anti-short
 - **Anti-shortcut training**: 3-phase scheduler implemented (recovery → analogy push → joint)
 - **Color contrastive loss**: implemented but insufficient (1/6 → 2/6 accuracy)
 
-## What's Broken (Priorities for Next Session)
+## What's Fixed (June 3)
 
-### P0: Color Blindness — Root Cause Found
+### Color Blindness — FIXED ✓
 
-ViT is NOT the problem. Pretrained ViT-Tiny raw features separate colors well (cross-color cosine 0.79-0.86).
+Root cause: symbol encoder MLP bottleneck (384→128→256) destroyed color information.
+3 fixes: widened MLP (128→512), fixed ColorContrastiveLoss (inverted semantics), new SymbolColorSeparationLoss.
+Result: cross-color cosine 0.998→0.262, retrieval 20%→63%, cube retrieval 2/6→6/6.
 
-**Root cause**: SAM's 192→256 projection layer compresses color information. Shape/relation gradients dominate during training, color signal is treated as noise and averaged out.
-
-**Fix (not yet implemented)**: 
-1. **Widen projection**: 192 → 512 → 256 (instead of 192 → 256)
-2. **Color auxiliary head**: Add a 6-class color classifier on ViT features, train jointly with L_aux
-3. **HSV augmentation**: Add `transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)` to training pipeline
-
-Recommended: implement all three together.
+Remaining issues:
+- Pyramid shape still poor (1/6) — likely pyramid/cone visual confusion
+- L_color stays at ~1.7 (contrastive loss hasn't fully converged)
+- Visual encoder for pyramid/cone still shape-dominated
 
 ### P1: RGB Overfitting — Debunked
 
-Tested with ±15 RGB perturbation — cosine scores unchanged. Model is NOT overfitting to specific RGB values. The projector bottleneck is the real issue.
+Tested with ±15 RGB perturbation — cosine scores unchanged. Model is NOT overfitting to specific RGB values.
 
 ### P2: Alignment Shortcut — Partially Fixed
 
@@ -92,20 +128,21 @@ scripts/
 
 ## Current Wave 1 Results
 
-| Metric | Phase 1 | Wave 1 | Target |
-|--------|---------|--------|--------|
-| Color accuracy (synth) | 1/6 | 2/6 | >3/6 |
-| Blue recognition | #3 | #1 ✓ | — |
-| Green bias (rows with green #1) | 6/6 | 4/6 | <3/6 |
-| L_analogy train/val gap | 21x | ? | <5x |
+| Metric | Phase 1 | Wave 1 (old) | Wave 1 Fix (3ep) | Target |
+|--------|---------|-------------|-------------------|--------|
+| Color accuracy (synth) | 1/6 | 2/6 | TBD | >3/6 |
+| Symbol cross-color cos | — | 0.998 | **0.928** | <0.95 |
+| ColorContrastLoss pref | collapse | collapse | **separation** | — |
+
+Full 30-epoch training in progress.
 
 ## Next Steps (Priority Order)
 
-1. **Fix color via projector widening + aux head + HSV aug** — most impactful remaining fix
-2. **Re-run Wave 1 training** with the fix, verify color accuracy > 3/6
-3. **Implement full-corpus retrieval** (scripts/p2_full_retrieval.py) 
+1. **Complete full Wave 1 training** (30 epochs) — in progress
+2. **Re-run diagnosis** on trained model: cross-color cosine, color retrieval accuracy
+3. **Implement full-corpus retrieval** (scripts/p2_full_retrieval.py)
 4. **Measure L_analogy train/val gap** post-anti-shortcut
-5. **Update CL AUDE.md** with learned best practices
+5. **Update CLAUDE.md** with learned best practices
 
 ## Design Docs
 

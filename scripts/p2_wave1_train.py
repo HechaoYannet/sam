@@ -33,6 +33,7 @@ from sam.losses.align import AlignmentLoss
 from sam.losses.relational import RelationalConsistencyLoss
 from sam.losses.analogy import AnalogyLoss
 from sam.losses.color_contrastive import ColorContrastiveLoss
+from sam.losses.symbol_color import SymbolColorSeparationLoss
 from sam.losses.perturb import PerturbationLoss
 
 
@@ -64,13 +65,16 @@ class AntiShortcutScheduler:
     def get_loss_weights(self, phase):
         if phase == "recovery":
             return {"align": 0.3, "rel": 1.0, "analogy": 0.0,
-                    "disentangle": 0.0, "color_contrast": 0.5, "perturb": 0.0}
+                    "disentangle": 0.0, "color_contrast": 0.5,
+                    "sym_color": 0.3, "perturb": 0.0}
         elif phase == "analogy":
             return {"align": 0.1, "rel": 0.5, "analogy": 2.0,
-                    "disentangle": 0.1, "color_contrast": 0.3, "perturb": 0.3}
+                    "disentangle": 0.1, "color_contrast": 0.3,
+                    "sym_color": 0.3, "perturb": 0.3}
         else:  # joint
             return {"align": 0.5, "rel": 1.0, "analogy": 1.0,
-                    "disentangle": 0.1, "color_contrast": 0.2, "perturb": 0.0}
+                    "disentangle": 0.1, "color_contrast": 0.2,
+                    "sym_color": 0.2, "perturb": 0.0}
 
     def total_epochs(self):
         return self.boundaries["joint"][1]
@@ -182,18 +186,25 @@ def main():
     print(f"Train scenes: {n_train}, Val scenes: {len(scenes_val)}")
     print(f"Train analogies: {len(analogy_train)}, Batch size: {batch_size}")
 
-    # Model
+    # Model — hidden_dim=512 removes the MLP bottleneck that destroys color
     visual = VisualEncoder(cfg.model, cfg.model.manifold_dim)
     symbol = SymbolEncoder(cat_sizes, cfg.model.symbol_embed_dim,
-                           cfg.model.symbol_hidden_dim,
+                           512,  # widened from 128 to preserve color information
                            cfg.model.manifold_dim)
     model = SAMPipeline(visual, symbol, cfg.model.manifold_dim).to(args.device)
 
-    # Load P3 checkpoint
+    # Load P3 checkpoint — manually filter out widened MLP layers
     p3_ckpt_path = Path(args.p3_dir) / "checkpoint_best.pt"
     ckpt = torch.load(str(p3_ckpt_path), map_location=args.device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    print(f"Loaded P3 checkpoint from {p3_ckpt_path}")
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in ckpt["model_state_dict"].items()
+                       if k in model_dict and model_dict[k].shape == v.shape}
+    skipped = [k for k in ckpt["model_state_dict"] if k not in pretrained_dict]
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
+    if skipped:
+        print(f"Skipped {len(skipped)} params (widened MLP, random init)")
+    print(f"Loaded {len(pretrained_dict)}/{len(ckpt['model_state_dict'])} params from P3")
 
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -204,6 +215,7 @@ def main():
     loss_rel = RelationalConsistencyLoss()
     loss_analogy = AnalogyLoss()
     loss_color = ColorContrastiveLoss(temperature=0.1)
+    loss_sym_color = SymbolColorSeparationLoss(margin=0.9)
     loss_perturb = PerturbationLoss(perturb_prob=0.3, margin=0.5)
 
     # Optimizer (fresh — don't load optimizer state from P3)
@@ -226,7 +238,7 @@ def main():
         t0 = time.time()
 
         metrics = {"loss_align": 0, "loss_rel": 0, "loss_analogy": 0,
-                    "loss_color": 0, "loss_perturb": 0}
+                    "loss_color": 0, "loss_sym_color": 0, "loss_perturb": 0}
         n_batches = 0
 
         # Create analogy iterator
@@ -265,6 +277,14 @@ def main():
                     total_loss = total_loss + weights["color_contrast"] * lc
                     metrics["loss_color"] += lc.item()
 
+            # --- L_sym-color-separation (on symbol full output) ---
+            if weights["sym_color"] > 0:
+                shape_ids, color_ids = get_shape_color_ids(batch, cat_to_idx)
+                lsc = loss_sym_color(z_s, shape_ids, color_ids)
+                if lsc.item() > 0:
+                    total_loss = total_loss + weights["sym_color"] * lsc
+                    metrics["loss_sym_color"] += lsc.item()
+
             # --- Analogy step (interleaved) ---
             if analogy_iter and weights["analogy"] > 0:
                 try:
@@ -285,6 +305,19 @@ def main():
                 la_ = loss_analogy(z_va, z_vb, z_sa, z_sb)
                 total_loss = total_loss + weights["analogy"] * la_
                 metrics["loss_analogy"] += la_.item()
+
+                # L_sym-color-separation on analogy symbols
+                if weights["sym_color"] > 0:
+                    shape_a = a_batch["sym_a"]["OBJ"][:, 0]
+                    color_a = a_batch["sym_a"]["COL"][:, 0]
+                    shape_b = a_batch["sym_b"]["OBJ"][:, 0]
+                    color_b = a_batch["sym_b"]["COL"][:, 0]
+                    lsc_a = loss_sym_color(z_sa, shape_a, color_a)
+                    lsc_b = loss_sym_color(z_sb, shape_b, color_b)
+                    lsc = (lsc_a + lsc_b) / 2
+                    if lsc.item() > 0:
+                        total_loss = total_loss + weights["sym_color"] * lsc
+                        metrics["loss_sym_color"] += lsc.item()
 
                 # L_perturb: penalize alignment shortcut
                 if weights["perturb"] > 0:

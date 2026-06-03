@@ -1,8 +1,9 @@
 """Color-specific contrastive loss.
 
-Forces the model to separate same-shape-different-color samples in the
-manifold. Without this, the shape signal dominates and colors collapse
-to a "green default" embedding.
+Forces the model to group same-color-different-shape samples together
+in the manifold. This prevents shape from dominating and encourages
+color-based organization. Same-color pairs are positives, pulling them
+together across different shapes.
 """
 
 import torch
@@ -11,9 +12,9 @@ import torch.nn.functional as F
 
 
 class ColorContrastiveLoss(nn.Module):
-    """Within-batch contrastive loss that treats same-shape-different-color
-    pairs as positives, pushing the model to use color as a distinguishing
-    feature rather than relying solely on shape."""
+    """Within-batch contrastive loss that treats same-color-different-shape
+    pairs as positives, pulling objects together by color and preventing
+    shape from dominating the manifold."""
 
     def __init__(self, temperature: float = 0.1):
         super().__init__()
@@ -37,10 +38,12 @@ class ColorContrastiveLoss(nn.Module):
         # Cosine similarity matrix
         sim = torch.matmul(z, z.T) / self.temperature  # (B, B)
 
-        # Build positive mask: same shape, DIFFERENT color
-        same_shape = shape_ids.unsqueeze(0) == shape_ids.unsqueeze(1)  # (B, B)
-        diff_color = color_ids.unsqueeze(0) != color_ids.unsqueeze(1)  # (B, B)
-        pos_mask = same_shape & diff_color  # (B, B)
+        # Build positive mask: same color, DIFFERENT shape.
+        # This pulls same-color objects together across shapes, encouraging
+        # color-based organization instead of reinforcing shape dominance.
+        same_color = color_ids.unsqueeze(0) == color_ids.unsqueeze(1)  # (B, B)
+        diff_shape = shape_ids.unsqueeze(0) != shape_ids.unsqueeze(1)   # (B, B)
+        pos_mask = same_color & diff_shape  # (B, B)
 
         # Self-exclusion
         pos_mask = pos_mask.fill_diagonal_(False)

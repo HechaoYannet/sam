@@ -13,7 +13,7 @@ class SymbolEncoder(nn.Module):
     """
 
     def __init__(self, cat_sizes: dict[str, int], embed_dim: int = 64,
-                 hidden_dim: int = 128, manifold_dim: int = 256):
+                 hidden_dim: int = 512, manifold_dim: int = 256):
         super().__init__()
         self.embed_dim = embed_dim
         self.manifold_dim = manifold_dim

@@ -73,14 +73,24 @@ def main():
 
     visual = VisualEncoder(cfg.model, cfg.model.manifold_dim)
     symbol = SymbolEncoder(cat_sizes, cfg.model.symbol_embed_dim,
-                           cfg.model.symbol_hidden_dim,
+                           512,  # widened from 128
                            cfg.model.manifold_dim)
     model = SAMPipelineStripped(visual, symbol, cfg.model.manifold_dim).to(device)
 
-    ckpt_path = Path("outputs/p2_wave1/checkpoint_best.pt")
+    # Try new fix checkpoint first, fall back to old P3
+    ckpt_path = Path("outputs/p2_wave1_fix/checkpoint_epoch030.pt")
+    if not ckpt_path.exists():
+        ckpt_path = Path("outputs/p2_wave1_fix/checkpoint_best.pt")
+    if not ckpt_path.exists():
+        ckpt_path = Path("outputs/p2_wave1/checkpoint_best.pt")
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model_dict = model.state_dict()
+    pretrained_dict = {k: v for k, v in ckpt["model_state_dict"].items()
+                       if k in model_dict and model_dict[k].shape == v.shape}
+    model_dict.update(pretrained_dict)
+    model.load_state_dict(model_dict)
     model.eval()
+    print(f"Loaded {len(pretrained_dict)}/{len(ckpt['model_state_dict'])} params from {ckpt_path}")
 
     transform = transforms.Compose([
         transforms.Resize((224, 224)), transforms.ToTensor(),
