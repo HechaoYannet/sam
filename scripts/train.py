@@ -58,8 +58,16 @@ def load_metadata(data_dir: Path):
 
 def build_loaders(cfg, cat_to_idx, single_meta, scenes_meta, analogy_meta):
     """Build all DataLoaders."""
-    kwargs = dict(
+    train_kwargs = dict(
         num_workers=cfg.train.num_workers,
+        pin_memory=cfg.train.pin_memory,
+        prefetch_factor=cfg.train.prefetch_factor,
+        persistent_workers=True,
+        collate_fn=collate_fn,
+    )
+    eval_kwargs = dict(
+        num_workers=cfg.train.num_workers,
+        pin_memory=cfg.train.pin_memory,
         collate_fn=collate_fn,
     )
 
@@ -67,27 +75,29 @@ def build_loaders(cfg, cat_to_idx, single_meta, scenes_meta, analogy_meta):
     single_dataset = SingleObjectDataset(single_meta, cat_to_idx)
     single_loader = DataLoader(
         single_dataset, batch_size=cfg.train.micro_batch_size,
-        shuffle=True, **kwargs,
+        shuffle=True, **train_kwargs,
     )
 
-    # Scene loaders
+    # Scene loaders (only train/val needed)
     scene_loaders = {}
-    for split in ["train", "val", "test_iid", "test_ood"]:
+    for split in ["train", "val"]:
         if split in scenes_meta:
             dataset = SceneDataset(scenes_meta[split], cat_to_idx)
             scene_loaders[split] = DataLoader(
                 dataset, batch_size=cfg.train.micro_batch_size,
-                shuffle=(split == "train"), **kwargs,
+                shuffle=(split == "train"),
+                **train_kwargs if split == "train" else eval_kwargs,
             )
 
-    # Analogy loaders
+    # Analogy loaders (only train/val needed)
     analogy_loaders = {}
-    for split in ["train", "val", "test_iid", "test_ood"]:
+    for split in ["train", "val"]:
         if split in analogy_meta and len(analogy_meta[split]) > 0:
             dataset = AnalogyDataset(analogy_meta[split], cat_to_idx)
             analogy_loaders[split] = DataLoader(
                 dataset, batch_size=cfg.train.micro_batch_size,
-                shuffle=(split == "train"), **kwargs,
+                shuffle=(split == "train"),
+                **train_kwargs if split == "train" else eval_kwargs,
             )
 
     return single_loader, scene_loaders, analogy_loaders

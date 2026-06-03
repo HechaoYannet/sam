@@ -18,6 +18,7 @@ from sam.losses.align import AlignmentLoss
 from sam.losses.relational import RelationalConsistencyLoss
 from sam.losses.analogy import AnalogyLoss
 from sam.losses.disentangle import DisentangleLoss
+from sam.losses.vicreg import ManifoldRegularizer
 
 
 class SAMPipeline(nn.Module):
@@ -61,15 +62,38 @@ class SAMTrainer:
         self.loss_analogy = AnalogyLoss()
         self.loss_disentangle = DisentangleLoss()
 
+        # Wave 3: scalable regularization (VICReg + DecoderBottleneck)
+        self.use_vicreg = getattr(cfg.loss, 'use_vicreg', False)
+        self.use_decoder = getattr(cfg.loss, 'use_decoder', False)
+        if self.use_vicreg or self.use_decoder:
+            self.regularizer = ManifoldRegularizer(
+                manifold_dim=cfg.model.manifold_dim,
+                cat_sizes=cat_sizes,
+                var_weight=getattr(cfg.loss, 'vicreg_var_weight', 0.5),
+                cov_weight=getattr(cfg.loss, 'vicreg_cov_weight', 0.5),
+                decoder_hidden=getattr(cfg.loss, 'decoder_hidden', 128),
+            ).to(cfg.device)
+            self.decoder_weight = getattr(cfg.loss, 'decoder_weight', 0.5)
+            print(f"  VICReg: {self.use_vicreg}, Decoder: {self.use_decoder}")
+            print(f"  Regularizer params: {sum(p.numel() for p in self.regularizer.parameters()):,}")
+
         # Optimizer
         proj_params = list(model.v_proj.parameters()) + list(model.s_proj.parameters())
         encoder_params = list(model.visual_encoder.parameters()) + \
                          list(model.symbol_encoder.parameters())
 
-        self.optimizer = torch.optim.AdamW([
+        param_groups = [
             {"params": encoder_params, "lr": cfg.train.lr},
             {"params": proj_params, "lr": cfg.train.lr_projection},
-        ], weight_decay=cfg.train.weight_decay, betas=cfg.train.betas)
+        ]
+        if hasattr(self, 'regularizer'):
+            param_groups.append(
+                {"params": list(self.regularizer.parameters()),
+                 "lr": cfg.train.lr})
+
+        self.optimizer = torch.optim.AdamW(
+            param_groups,
+            weight_decay=cfg.train.weight_decay, betas=cfg.train.betas)
 
         # LR scheduler
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -200,6 +224,18 @@ class SAMTrainer:
                         self.writer.add_scalar("train/loss_rel", metrics["loss_rel"] / n_batches, self.global_step)
                     if "loss_analogy" in metrics:
                         self.writer.add_scalar("train/loss_analogy", metrics["loss_analogy"] / n_batches, self.global_step)
+                    if "loss_vicreg" in metrics:
+                        self.writer.add_scalar("train/loss_vicreg", metrics["loss_vicreg"] / n_batches, self.global_step)
+                    if "loss_var" in metrics:
+                        self.writer.add_scalar("train/loss_var", metrics["loss_var"] / n_batches, self.global_step)
+                    if "loss_cov" in metrics:
+                        self.writer.add_scalar("train/loss_cov", metrics["loss_cov"] / n_batches, self.global_step)
+                    if "loss_decoder" in metrics:
+                        self.writer.add_scalar("train/loss_decoder", metrics["loss_decoder"] / n_batches, self.global_step)
+                    for cat_name in self.cat_sizes:
+                        k = f"dec_acc_{cat_name}"
+                        if k in metrics:
+                            self.writer.add_scalar(f"train/dec_acc_{cat_name}", metrics[k] / n_batches, self.global_step)
                     self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
                     self.writer.add_scalar("train/phase", ["warmup", "relation", "analogy", "finetune"].index(phase), self.global_step)
 
@@ -327,6 +363,23 @@ class SAMTrainer:
             l_disent = self._compute_disentangle(per_cat, batch["tokens"])
             total_loss += loss_weights["disentangle"] * l_disent
             metrics["loss_disentangle"] = l_disent.item()
+
+        # Wave 3: VICReg + Decoder scalable regularization
+        if hasattr(self, 'regularizer'):
+            reg_out = self.regularizer(z_s, batch["tokens"])
+            if self.use_vicreg:
+                l_vicreg = reg_out["total_loss"]
+                total_loss += l_vicreg
+                metrics["loss_vicreg"] = l_vicreg.item()
+                metrics["loss_var"] = reg_out["var_loss"].item()
+                metrics["loss_cov"] = reg_out["cov_loss"].item()
+            if self.use_decoder:
+                l_dec = self.decoder_weight * reg_out["loss"]
+                total_loss += l_dec
+                metrics["loss_decoder"] = l_dec.item()
+                for cat in self.cat_sizes:
+                    if f"acc_{cat}" in reg_out:
+                        metrics[f"dec_acc_{cat}"] = reg_out[f"acc_{cat}"].item()
 
         return total_loss, metrics
 

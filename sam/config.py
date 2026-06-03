@@ -60,6 +60,13 @@ class LossConfig:
     beta_analogy: float = 1.0    # analogy completion weight
     gamma_disentangle: float = 0.1  # disentanglement weight
     alignment_temperature: float = 0.07  # for InfoNCE
+    # VICReg + Decoder (Wave 3: scalable regularization)
+    use_vicreg: bool = False       # enable VICReg variance/covariance
+    vicreg_var_weight: float = 0.5  # variance loss weight
+    vicreg_cov_weight: float = 0.5  # covariance loss weight
+    use_decoder: bool = False      # enable decoder bottleneck
+    decoder_weight: float = 0.5    # decoder cross-entropy weight
+    decoder_hidden: int = 128      # decoder hidden dimension
 
 
 @dataclass
@@ -87,7 +94,9 @@ class TrainConfig:
 
     # Precision
     use_amp: bool = True   # bfloat16
-    num_workers: int = 2
+    num_workers: int = 4
+    pin_memory: bool = True
+    prefetch_factor: int = 2
 
     # Logging
     log_interval: int = 50  # steps between logs
