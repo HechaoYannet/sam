@@ -269,8 +269,9 @@ class SAMTrainer:
         with torch.no_grad():
             for batch in scene_loader:
                 batch = self._to_device(batch)
+                color_rgb = batch.get("color_rgb", None)
                 z_v = self.model.encode_visual(batch["image"])
-                z_s = self.model.encode_symbol(batch["tokens"])
+                z_s = self.model.encode_symbol(batch["tokens"], color_rgb=color_rgb)
 
                 metrics["val_align"] += self.loss_align(z_v, z_s).item()
 
@@ -287,10 +288,12 @@ class SAMTrainer:
                     try:
                         a_batch = next(analogy_iter)
                         a_batch = self._to_device(a_batch)
+                        color_rgb_a = a_batch.get("color_rgb_a", None)
+                        color_rgb_b = a_batch.get("color_rgb_b", None)
                         za = self.model.encode_visual(a_batch["img_a"])
                         zb = self.model.encode_visual(a_batch["img_b"])
-                        sa = self.model.encode_symbol(a_batch["sym_a"])
-                        sb = self.model.encode_symbol(a_batch["sym_b"])
+                        sa = self.model.encode_symbol(a_batch["sym_a"], color_rgb=color_rgb_a)
+                        sb = self.model.encode_symbol(a_batch["sym_b"], color_rgb=color_rgb_b)
                         metrics["val_analogy"] += self.loss_analogy(za, zb, sa, sb).item()
                     except StopIteration:
                         pass
