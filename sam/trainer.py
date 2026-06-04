@@ -34,11 +34,12 @@ class SAMPipeline(nn.Module):
     def encode_visual(self, x):
         return self.v_proj(self.visual_encoder(x))
 
-    def encode_symbol(self, tokens, return_per_category=False):
+    def encode_symbol(self, tokens, color_rgb=None, return_per_category=False):
         if return_per_category:
-            z, per_cat = self.symbol_encoder(tokens, return_per_category=True)
+            z, per_cat = self.symbol_encoder(tokens, color_rgb=color_rgb,
+                                              return_per_category=True)
             return self.s_proj(z), per_cat
-        return self.s_proj(self.symbol_encoder(tokens))
+        return self.s_proj(self.symbol_encoder(tokens, color_rgb=color_rgb))
 
 
 class SAMTrainer:
@@ -339,8 +340,11 @@ class SAMTrainer:
         metrics = {}
         total_loss = 0.0
 
+        color_rgb = batch.get("color_rgb", None)
+
         z_v = self.model.encode_visual(batch["image"])
         z_s, per_cat = self.model.encode_symbol(batch["tokens"],
+                                                 color_rgb=color_rgb,
                                                  return_per_category=True)
 
         if loss_weights["align"] > 0:
@@ -391,11 +395,16 @@ class SAMTrainer:
         metrics = {}
         total_loss = 0.0
 
+        color_rgb_a = batch.get("color_rgb_a", None)
+        color_rgb_b = batch.get("color_rgb_b", None)
+
         z_va = self.model.encode_visual(batch["img_a"])
         z_vb = self.model.encode_visual(batch["img_b"])
         z_sa, per_cat_a = self.model.encode_symbol(batch["sym_a"],
+                                                     color_rgb=color_rgb_a,
                                                      return_per_category=True)
         z_sb, per_cat_b = self.model.encode_symbol(batch["sym_b"],
+                                                     color_rgb=color_rgb_b,
                                                      return_per_category=True)
 
         if loss_weights["align"] > 0:
