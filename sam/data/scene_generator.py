@@ -393,7 +393,13 @@ class SceneGenerator:
 
         single_meta = self.generate_single_objects()
         scenes_meta = self.generate_scenes(n_scenes_per_split)
-        analogy_meta = self.generate_structured_analogies(scenes_meta, n_variants_per_scene=self.cfg.n_analogy_variants_per_scene, n_per_split=n_analogy_per_split)
+        if getattr(self.cfg, 'structured_analogy', False):
+            analogy_meta = self.generate_structured_analogies(
+                scenes_meta,
+                n_variants_per_scene=self.cfg.n_analogy_variants_per_scene,
+                n_per_split=n_analogy_per_split)
+        else:
+            analogy_meta = self.generate_analogy_samples(scenes_meta, n_analogy_per_split)
 
         # Compute summary statistics
         n_single = len(single_meta)

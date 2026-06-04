@@ -41,10 +41,15 @@ def main():
                         help="Number of validation analogy samples")
     parser.add_argument("--n_analogy_test", type=int, default=4000,
                         help="Number of test analogy samples")
+    parser.add_argument("--structured_analogy", action="store_true", default=True,
+                        help="Use structured single-attribute-change analogies (v8)")
+    parser.add_argument("--random_analogy", action="store_true",
+                        help="Use old random-pair analogy generation")
     args = parser.parse_args()
 
     cfg = Config()
     cfg.seed = args.seed
+    cfg.data.structured_analogy = not args.random_analogy
 
     output_dir = Path(args.output_dir)
 
@@ -55,7 +60,7 @@ def main():
         seed=args.seed,
     )
 
-    # Generate all data
+    # Generate all data (generate_all respects cfg.structured_analogy)
     single_meta, scenes_meta, analogy_meta = generator.generate_all(
         n_scenes_per_split={
             "train": args.n_train,
