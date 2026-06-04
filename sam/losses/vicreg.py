@@ -68,6 +68,9 @@ class DecoderBottleneck(nn.Module):
     Information-theoretic guarantee: if the decoder can recover attributes
     from z, then z must contain all attribute information. No per-attribute
     loss design needed — just add a prediction head for each attribute.
+
+    Supports continuous color via rgb_head when tokens['color_rgb'] is present.
+    When color_rgb is in tokens, COL uses MSE regression instead of cross-entropy.
     """
 
     def __init__(self, manifold_dim: int, cat_sizes: dict[str, int],
@@ -91,6 +94,9 @@ class DecoderBottleneck(nn.Module):
         for cat, vocab_size in cat_sizes.items():
             self.heads[cat] = nn.Linear(hidden_dim, vocab_size)
 
+        # v8: Continuous color regression head (parallel to discrete COL head)
+        self.rgb_head = nn.Linear(hidden_dim, 3)  # outputs (R, G, B) in [0, 1]
+
     def forward(self, z: torch.Tensor,
                 tokens: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Predict attributes from manifold embedding.
@@ -110,17 +116,27 @@ class DecoderBottleneck(nn.Module):
         for cat, head in self.heads.items():
             if cat not in tokens:
                 continue
-            labels = tokens[cat][:, 0]  # (B,) first object's attribute
-            logits = head(h)            # (B, vocab)
-            cat_loss = F.cross_entropy(logits, labels)
-            total_loss = total_loss + cat_loss
-            n_cats += 1
 
-            # Accuracy for monitoring
-            pred = logits.argmax(dim=-1)
-            acc = (pred == labels).float().mean()
-            results[f"loss_{cat}"] = cat_loss
-            results[f"acc_{cat}"] = acc
+            if cat == 'COL' and 'color_rgb' in tokens:
+                # Continuous color: MSE regression
+                rgb_target = tokens['color_rgb'][:, 0, :]  # (B, 3)
+                rgb_pred = torch.sigmoid(self.rgb_head(h))
+                rgb_loss = F.mse_loss(rgb_pred, rgb_target)
+                results["loss_rgb"] = rgb_loss
+                results["loss_COL"] = rgb_loss
+                total_loss += rgb_loss
+                n_cats += 1
+                # Proxy accuracy: 1 - mean abs error
+                results["acc_COL"] = 1.0 - (rgb_pred - rgb_target).abs().mean()
+            else:
+                labels = tokens[cat][:, 0]
+                logits = head(h)
+                cat_loss = F.cross_entropy(logits, labels)
+                results[f"loss_{cat}"] = cat_loss
+                total_loss += cat_loss
+                n_cats += 1
+                pred = logits.argmax(dim=-1)
+                results[f"acc_{cat}"] = (pred == labels).float().mean()
 
         results["loss"] = total_loss / max(n_cats, 1)
         return results
