@@ -211,15 +211,27 @@ class ShapeRenderer:
         self.image_size = image_size
         self.bg_color = bg_color
 
-    def render_single_object(self, obj_type, color_name, size, material,
-                             angle_variant=0):
+    def render_single_object(self, obj_type, color_name=None, size="medium",
+                             material="matte", angle_variant=0,
+                             color_rgb_override=None):
         """Render a single object centered in the frame.
+
+        Args:
+            obj_type: str, one of cube, sphere, cylinder, cone, pyramid.
+            color_name: str or None, named color from COLOR_MAP.
+            size: str, one of small, medium, large.
+            material: str, one of matte, shiny, metallic, glass.
+            angle_variant: int, 0 for centered, ±1 for slight offset.
+            color_rgb_override: tuple or None, direct (r,g,b) in [0,1].
 
         Returns:
             PIL.Image of the rendered object.
         """
         scale = SIZE_SCALE[size]
-        color_rgb = COLOR_MAP[color_name]
+        if color_rgb_override is not None:
+            color_rgb = color_rgb_override
+        else:
+            color_rgb = COLOR_MAP[color_name]
         angle_offset = (angle_variant - 1) * 0.05  # subtle variation
 
         dpi = 100
@@ -244,6 +256,25 @@ class ShapeRenderer:
         img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
         return img
 
+    def render_single_object_rgb(self, obj_type, color_rgb, size="medium",
+                                  material="matte", angle_variant=0):
+        """Render a single object with continuous RGB color.
+
+        Args:
+            obj_type: str, one of cube, sphere, cylinder, cone, pyramid.
+            color_rgb: tuple, (r,g,b) in [0,1].
+            size: str, one of small, medium, large.
+            material: str, one of matte, shiny, metallic, glass.
+            angle_variant: int, 0 for centered, ±1 for slight offset.
+
+        Returns:
+            PIL.Image of the rendered object.
+        """
+        return self.render_single_object(
+            obj_type=obj_type, color_name=None, size=size,
+            material=material, angle_variant=angle_variant,
+            color_rgb_override=color_rgb)
+
     def render_scene(self, obj_a, obj_b, relation):
         """Render a dual-object scene.
 
@@ -257,8 +288,14 @@ class ShapeRenderer:
         """
         scale_a = SIZE_SCALE[obj_a["size"]]
         scale_b = SIZE_SCALE[obj_b["size"]]
-        color_a = COLOR_MAP[obj_a["color"]]
-        color_b = COLOR_MAP[obj_b["color"]]
+        if "color_rgb" in obj_a:
+            color_a = obj_a["color_rgb"]
+        else:
+            color_a = COLOR_MAP[obj_a["color"]]
+        if "color_rgb" in obj_b:
+            color_b = obj_b["color_rgb"]
+        else:
+            color_b = COLOR_MAP[obj_b["color"]]
 
         positions = _compute_positions(relation)
 
@@ -286,6 +323,18 @@ class ShapeRenderer:
         img = Image.open(buf).convert('RGB')
         img = img.resize((self.image_size, self.image_size), Image.BILINEAR)
         return img
+
+
+    def render_scene_rgb(self, obj_a, obj_b, relation):
+        """Render a scene where objects may have continuous RGB colors.
+
+        Obj dicts may contain 'color_rgb' key with (r,g,b) tuple
+        instead of 'color'. Delegates to render_scene which handles both.
+
+        Returns:
+            PIL.Image of the rendered scene.
+        """
+        return self.render_scene(obj_a, obj_b, relation)
 
 
 def _compute_positions(relation):
