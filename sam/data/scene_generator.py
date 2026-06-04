@@ -371,7 +371,7 @@ class SceneGenerator:
                 variant_scene["relation"])
 
         # Save variant image
-        fname = f"variant_{split_name}_{uuid.uuid4().hex[:8]}.png"
+        fname = f"variant_{split_name}_{uuid.uuid4().hex}.png"
         img_path = self.output_dir / "images" / split_name / fname
         img.save(img_path)
 
@@ -393,7 +393,7 @@ class SceneGenerator:
 
         single_meta = self.generate_single_objects()
         scenes_meta = self.generate_scenes(n_scenes_per_split)
-        analogy_meta = self.generate_analogy_samples(scenes_meta, n_analogy_per_split)
+        analogy_meta = self.generate_structured_analogies(scenes_meta, n_variants_per_scene=self.cfg.n_analogy_variants_per_scene, n_per_split=n_analogy_per_split)
 
         # Compute summary statistics
         n_single = len(single_meta)
