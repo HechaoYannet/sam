@@ -47,12 +47,15 @@ def build_vocabs(cfg):
     return cat_to_idx, cat_sizes, idx_to_token
 
 
-def tokenize(symbol_string: str, cat_to_idx: dict, max_objects: int = 2):
+def tokenize(symbol_string: str, cat_to_idx: dict, max_objects: int = 2,
+             color_rgb: torch.Tensor | None = None):
     """Convert a symbol string to per-category index tensors.
 
     Args:
         symbol_string: e.g. "[OBJ:cube] [COL:red] ... [REL:left_of] [OBJ:sphere] ..."
         cat_to_idx: category -> {value: idx} mapping
+        color_rgb: optional (max_objects, 3) float tensor of continuous RGB values.
+                   When provided, stored in the returned dict under the key "color_rgb".
 
     Returns:
         Dict mapping category -> LongTensor of indices.
@@ -82,6 +85,9 @@ def tokenize(symbol_string: str, cat_to_idx: dict, max_objects: int = 2):
     for cat in ["REL"]:
         indices = result.get(cat, [cat_to_idx["REL"]["[PAD]"]] * max_objects)
         output[cat] = torch.tensor(indices[:max_objects], dtype=torch.long)
+
+    if color_rgb is not None:
+        output["color_rgb"] = color_rgb
 
     return output
 
@@ -138,14 +144,29 @@ class SceneDataset(Dataset):
         img = Image.open(item["image_path"]).convert("RGB")
         img_tensor = self.transform(img)
 
-        tokens = tokenize(item["symbol_string"], self.cat_to_idx)
+        # Check for continuous color metadata
+        color_rgb = None
+        if item.get("color_type") == "continuous":
+            rgb_a = torch.tensor(
+                item["obj_a"].get("color_rgb", (0.5, 0.5, 0.5)),
+                dtype=torch.float32)
+            rgb_b = torch.tensor(
+                item["obj_b"].get("color_rgb", (0.5, 0.5, 0.5)),
+                dtype=torch.float32)
+            color_rgb = torch.stack([rgb_a, rgb_b])  # (2, 3)
 
-        return {
+        tokens = tokenize(item["symbol_string"], self.cat_to_idx,
+                         color_rgb=color_rgb)
+
+        result = {
             "image": img_tensor,
             "tokens": tokens,
             "symbol_string": item["symbol_string"],
             "relation": item["relation"],
         }
+        if color_rgb is not None:
+            result["color_rgb"] = color_rgb
+        return result
 
 
 class AnalogyDataset(Dataset):
@@ -174,15 +195,31 @@ class AnalogyDataset(Dataset):
         img_a_tensor = self.transform(img_a)
         img_b_tensor = self.transform(img_b)
 
-        sym_a_tokens = tokenize(sample["sym_a"], self.cat_to_idx)
-        sym_b_tokens = tokenize(sample["sym_b"], self.cat_to_idx)
+        # Check for continuous color in analogy samples
+        color_rgb_a = None
+        color_rgb_b = None
 
-        return {
+        if sample.get("color_rgb_a") is not None:
+            color_rgb_a = torch.tensor(sample["color_rgb_a"], dtype=torch.float32)
+        if sample.get("color_rgb_b") is not None:
+            color_rgb_b = torch.tensor(sample["color_rgb_b"], dtype=torch.float32)
+
+        sym_a_tokens = tokenize(sample["sym_a"], self.cat_to_idx,
+                               color_rgb=color_rgb_a)
+        sym_b_tokens = tokenize(sample["sym_b"], self.cat_to_idx,
+                               color_rgb=color_rgb_b)
+
+        result = {
             "img_a": img_a_tensor,
             "img_b": img_b_tensor,
             "sym_a": sym_a_tokens,
             "sym_b": sym_b_tokens,
         }
+        if color_rgb_a is not None:
+            result["color_rgb_a"] = color_rgb_a
+        if color_rgb_b is not None:
+            result["color_rgb_b"] = color_rgb_b
+        return result
 
 
 def collate_fn(batch):
@@ -197,6 +234,8 @@ def collate_fn(batch):
                 merged[cat] = torch.stack([td[cat] for td in token_dicts])
             result[key] = merged
         elif key in ("image", "img_a", "img_b"):
+            result[key] = torch.stack([b[key] for b in batch])
+        elif key in ("color_rgb", "color_rgb_a", "color_rgb_b"):
             result[key] = torch.stack([b[key] for b in batch])
         else:
             result[key] = [b[key] for b in batch]
