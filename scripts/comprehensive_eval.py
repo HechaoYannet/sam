@@ -303,6 +303,135 @@ def evaluate_e3_analogy(model, analogy_loader, cat_to_idx, device):
     }
 
 
+def evaluate_e1_unseen_hues(model, device, n_seen=6, n_unseen=12,
+                            shapes=None, sizes=None, materials=None):
+    """L1: Cross-modal retrieval on hues unseen during training.
+
+    Creates synthetic single-object images with unseen hues, encodes visual
+    and symbolic, and measures Top-1 retrieval accuracy.
+
+    Training uses 6 anchor hues (0deg, 60deg, 120deg, 180deg, 240deg, 300deg).
+    Test uses 12 offset hues (15deg, 45deg, 75deg, ...) -- completely unseen.
+
+    Returns:
+        dict with unseen_hue_top1, top3, top5
+    """
+    import colorsys
+    from sam.data.renderer import ShapeRenderer
+    from sam.data.dataset import tokenize
+    from torchvision import transforms
+    from PIL import Image
+
+    if shapes is None:
+        shapes = ['cube', 'sphere', 'cylinder', 'cone', 'pyramid']
+    if sizes is None:
+        sizes = ['medium']
+    if materials is None:
+        materials = ['matte']
+
+    renderer = ShapeRenderer()
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                           std=[0.229, 0.224, 0.225]),
+    ])
+
+    # Generate unseen hue images
+    unseen_imgs = []
+    unseen_rgbs = []
+    for i in range(n_unseen):
+        h = ((i * 360 // n_unseen) + 15) % 360  # offset by 15 degrees
+        h_norm = h / 360.0
+        rgb = colorsys.hsv_to_rgb(h_norm, 0.8, 0.9)
+        for shape in shapes:
+            img = renderer.render_single_object_rgb(shape, rgb, 'medium', 'matte')
+            img_t = transform(img)
+            unseen_imgs.append(img_t)
+            unseen_rgbs.append(rgb)
+
+    if len(unseen_imgs) == 0:
+        return {"unseen_hue_top1": 0, "unseen_hue_top3": 0, "unseen_hue_top5": 0}
+
+    img_batch = torch.stack(unseen_imgs).to(device)
+    rgb_batch = torch.tensor(unseen_rgbs, dtype=torch.float32, device=device)
+    # Repeat RGB for each shape (n_unseen hues * n_shapes images)
+    rgb_batch = rgb_batch.repeat_interleave(len(shapes), dim=0)
+
+    model.eval()
+    with torch.no_grad():
+        # Encode images
+        z_v = model.encode_visual(img_batch)
+        z_v = F.normalize(z_v, dim=-1)
+
+        # Encode symbols with continuous color (need dummy tokens)
+        # Use PAD token placeholders for non-color attributes
+        n_total = img_batch.shape[0]
+        dummy_tokens = {}
+        # Build minimal tokens -- all PAD for non-color categories
+        for cat in ['OBJ', 'COL', 'SIZE', 'MAT']:
+            dummy_tokens[cat] = torch.zeros(n_total, 1, dtype=torch.long, device=device)
+        # REL needs shape (B, 2) for compatibility
+        dummy_tokens['REL'] = torch.zeros(n_total, 2, dtype=torch.long, device=device)
+
+        z_s = model.encode_symbol(dummy_tokens, color_rgb=rgb_batch)
+        z_s = F.normalize(z_s, dim=-1)
+
+        # Retrieval: match each image to its symbol
+        sim = torch.matmul(z_v, z_s.T)  # (N, N)
+        _, pred = sim.topk(5, dim=1)
+        target = torch.arange(n_total, device=device)
+
+        top1 = (pred[:, 0] == target).float().mean().item()
+        top3 = (pred[:, :3] == target.unsqueeze(1)).any(dim=1).float().mean().item()
+        top5 = (pred[:, :5] == target.unsqueeze(1)).any(dim=1).float().mean().item()
+
+    return {"unseen_hue_top1": top1, "unseen_hue_top3": top3, "unseen_hue_top5": top5}
+
+
+def evaluate_structured_analogy(model, analogy_loader, device):
+    """L4: Per-attribute analogy accuracy.
+
+    Groups analogy samples by changed_attribute and reports
+    vector arithmetic cosine for each attribute separately.
+
+    Returns:
+        dict with per-attribute mean cosine similarity
+    """
+    from collections import defaultdict
+
+    model.eval()
+    attr_cosines = defaultdict(list)
+
+    with torch.no_grad():
+        for batch in tqdm(analogy_loader, desc="L4 structured analogy"):
+            batch = to_device(batch, device)
+            B = batch["img_a"].shape[0]
+
+            z_va = model.encode_visual(batch["img_a"])
+            z_vb = model.encode_visual(batch["img_b"])
+            z_sa = model.encode_symbol(batch["sym_a"])
+            z_sb_true = model.encode_symbol(batch["sym_b"])
+
+            # Predict: z_sb_pred = E_v(Ib) - E_v(Ia) + E_s(Sa)
+            z_pred = z_vb - z_va + z_sa
+            z_pred = torch.nn.functional.normalize(z_pred, dim=-1)
+            z_sb_true = torch.nn.functional.normalize(z_sb_true, dim=-1)
+
+            cos_sim = (z_pred * z_sb_true).sum(dim=-1)
+
+            # Group by changed_attribute
+            for i in range(B):
+                attr = batch.get("changed_attribute", ["unknown"] * B)
+                attr_name = attr[i] if isinstance(attr, list) else attr
+                attr_cosines[attr_name].append(cos_sim[i].item())
+
+    result = {}
+    for attr, cosines in attr_cosines.items():
+        result[f"L4_analogy_{attr}_cos"] = sum(cosines) / len(cosines)
+
+    return result
+
+
 def compute_manifold_health(model, cat_to_idx, device):
     """Full manifold health: effective rank, per-attribute variance, disentanglement."""
     colors = ['red', 'blue', 'green', 'yellow', 'purple', 'orange']
@@ -604,11 +733,31 @@ def main():
                 print(f"    E3 Direct cos={e3['e3_direct_cosine']:.4f} "
                       f"RetTop1={e3['e3_retrieval_top1']:.1%} "
                       f"RetTop3={e3['e3_retrieval_top3']:.1%}")
+
+                # v8 L4: Per-attribute analogy (if structured analogies available)
+                if analogies and "changed_attribute" in analogies[0]:
+                    l4 = evaluate_structured_analogy(model, analogy_loader, args.device)
+                    for k, v in l4.items():
+                        ckpt_results[f"{split_name}/{k}"] = v
+                    l4_summary = {k.split('_')[-2:][0]: f"{v:.4f}" for k, v in l4.items()}
+                    print(f"    L4 Structured Analogy: {l4_summary}")
             else:
                 print(f"    E3 Analogy: no data for {split_name}")
 
         elapsed = time.time() - t0
         print(f"\n  Completed in {elapsed:.1f}s")
+
+        # ---- v8: Unseen Hue Retrieval (L1) ----
+        print("\n  [v8 L1] Unseen hue retrieval...")
+        try:
+            l1 = evaluate_e1_unseen_hues(model, args.device, n_seen=6, n_unseen=12)
+            for k, v in l1.items():
+                ckpt_results[f"v8/{k}"] = v
+            print(f"    Unseen Hue Top1={l1['unseen_hue_top1']:.1%} "
+                  f"Top3={l1['unseen_hue_top3']:.1%} Top5={l1['unseen_hue_top5']:.1%}")
+        except Exception as e:
+            print(f"    L1 skipped: {e}")
+
         all_results[ckpt_name] = ckpt_results
 
     # ---- Summary Comparison ----

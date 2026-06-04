@@ -219,6 +219,7 @@ class AnalogyDataset(Dataset):
             result["color_rgb_a"] = color_rgb_a
         if color_rgb_b is not None:
             result["color_rgb_b"] = color_rgb_b
+        result["changed_attribute"] = sample.get("changed_attribute", "unknown")
         return result
 
 
