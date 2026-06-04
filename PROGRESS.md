@@ -1,6 +1,6 @@
 # SAM Project — Progress & Handoff
 
-**Last updated:** 2026-06-04 | **Current phase:** Phase 2 Wave 4 Implementation Complete → Wave 5: Full Training + Eval
+**Last updated:** 2026-06-04 | **Current phase:** Phase 2 Wave 4 Complete (v8 E1=83%) → Wave 5: Continuous Color Training
 
 ---
 
@@ -165,18 +165,46 @@ Replace exact-scene-retrieval (infeasible with large candidate sets) with:
 3. **Progressive strategy:** Discrete colors for warmup/relation phases (epoch 1-40), continuous color at analogy phase (epoch 41+). Config flags control the transition.
 4. **Decoder RGB regression:** `torch.sigmoid(Linear→3)` outputs (R,G,B) in [0,1], MSE loss. Auto-switches from CE (discrete) to MSE (continuous) based on presence of `color_rgb` in batch.
 
-### Smoke Test Results (5 epochs, 200 scenes)
+### Full Training Results (60 epochs, 12,000 scenes, 8,000 structured analogies)
 
-All loss terms active and converging:
-- loss_align: 1.44 → 0.47
-- loss_rel: 0.75 (epoch 5, relation phase start)
-- loss_decoder: 0.89 → 0.77
-- VICReg covariance: active (0.0001)
-- Decoder accs above random: OBJ 45%, COL 38%, SIZE 47%, MAT 38%, REL 37%
+#### v7 vs v8 Comparison
+
+| Metric | v7 | v8 | Δ |
+|--------|-----|-----|---|
+| **E1 test_ood Top1** | 62.4% | **83.0%** | **+20.6pp** |
+| **E1 test_iid Top1** | 67.4% | **79.0%** | **+11.6pp** |
+| **E1 val Top1** | 56.4% | **73.8%** | **+17.4pp** |
+| **E2 test_ood RSA ρ** | 0.938 | **0.997** | +0.059 |
+| **E2 test_iid RSA ρ** | 0.958 | **0.995** | +0.037 |
+
+#### Decoder Accuracies (Epoch 60)
+
+| Attribute | v7 | v8 | Δ |
+|-----------|-----|-----|---|
+| OBJ | 68.4% | 68.7% | ≈ |
+| COL | 65.9% | 70.1% | +4.2pp |
+| SIZE | 73.0% | 74.2% | +1.2pp |
+| MAT | 70.0% | 73.0% | +3.0pp |
+| REL | 100% | 100% | maintained |
+
+#### Manifold Health
+
+| Metric | v6 | v7 | v8 |
+|--------|-----|-----|-----|
+| Effective Rank | 6.2 | 7.5 | 7.1 |
+| OBJ PCA Var | 57.3% | 59.5% | 61.5% |
+| COL PCA Var | 0.02% | 0.74% | 0.45% |
+| SIZE PCA Var | 42.5% | 39.2% | 37.7% |
+| MAT PCA Var | 0.02% | 0.47% | 0.25% |
+
+**Key insight:** Structured analogies alone (+20.6pp E1) account for most of the gain. The model learns precise vector arithmetic when displacement vectors encode single attribute changes instead of random noise. E2 cross-modal isomorphism is near ceiling (RSA ρ=0.997).
+
+Full report: `docs/report/phase2_wave4_v8_report.md`
 
 ### Commits
 
 ```
+ff641c6 docs: v8 Wave4 complete — E1 test_ood 83.0% (+20.6pp), report & evaluation
 f73a72e fix(eval): add color_rgb to SAMPipeline.encode_symbol in eval script
 40b03f2 feat(data): add --structured_analogy/--random_analogy flags
 09310cb feat(eval): add v8 L1 unseen hue retrieval and L4 structured analogy eval
@@ -192,12 +220,12 @@ a530a45 feat(data): add structured analogy generation and hue sampling
 a55c571 feat(encoders): add ColorEncoder for continuous RGB→embedding
 ```
 
-### Next: Wave 5 — Full Training + Evaluation
+### Next: Wave 5 — Continuous Color Training
 
-- Run full 60-epoch training with v8 on complete dataset (20k scenes)
-- Evaluate L0-L4 against v7 baseline
-- Tune color_rgb_weight if needed
-- Fallback Route B: full continuous retrain if progressive strategy shows regression
+- [ ] Generate hue wheel dataset (36 continuous hues, 18 train + 12 OOD)
+- [ ] Progressive training: load v8 checkpoint, switch to continuous color at epoch 41+
+- [ ] Evaluate L1 (unseen hue retrieval, target ≥60%), L2 (manifold smoothness), L3 (color algebra)
+- [ ] Fallback Route B: full continuous retrain from scratch if progressive strategy regresses
 
 ---
 
@@ -219,7 +247,8 @@ a55c571 feat(encoders): add ColorEncoder for continuous RGB→embedding
 | `outputs/p2_wave1_fix/checkpoint_epoch030.pt` | MLP+SN | 30 | 24% | 0.61 | Old arch baseline |
 | `outputs/test_orthogonal_v5b/checkpoint_epoch015.pt` | Heads+Ortho+pcdr+attr | 15 | 76% | 0.83 | Per-attribute losses (removed) |
 | `outputs/v6_baseline/checkpoint_epoch060.pt` | Heads+Ortho | 60 | 50% | 0.94 | Clean baseline, color-blind |
-| `outputs/v7_vicreg_decoder/checkpoint_epoch060.pt` | Heads+Ortho+VICReg+Decoder | 60 | **62%** | 0.94 | **Current best** |
+| `outputs/v7_vicreg_decoder/checkpoint_epoch060.pt` | Heads+Ortho+VICReg+Decoder | 60 | 62% | 0.94 | Random analogy baseline |
+| `outputs/v8_full/checkpoint_epoch060.pt` | Heads+Ortho+VICReg+Decoder+ColorEnc | 60 | **83%** | 0.997 | **Current best — structured analogy** |
 
 ---
 
@@ -229,7 +258,8 @@ a55c571 feat(encoders): add ColorEncoder for continuous RGB→embedding
 sam/
 ├── encoders/
 │   ├── visual.py              — ViT-Tiny (freeze L0-7)
-│   └── symbol.py              — Per-category heads + direct sum
+│   ├── symbol.py              — Per-category heads + direct sum + ColorEncoder
+│   └── color_encoder.py       — RGB continuous color → embedding (v8 NEW)
 ├── manifold/
 │   └── projection.py          — Orthogonal parametrization
 ├── losses/
@@ -237,18 +267,19 @@ sam/
 │   ├── relational.py          — L_rel: displacement vector MSE
 │   ├── analogy.py             — L_analogy: vector arithmetic
 │   ├── disentangle.py         — L_disentangle: cross-category orthogonality
-│   └── vicreg.py              — VICReg covariance + DecoderBottleneck (NEW)
+│   └── vicreg.py              — VICReg covariance + DecoderBottleneck + RGB head
 ├── data/
-│   ├── renderer.py            — 2D shape renderer
-│   ├── scene_generator.py     — Combinatorial split + scene/analogy generation
-│   └── dataset.py             — Scene/Analogy datasets
+│   ├── renderer.py            — 2D shape renderer (+ RGB continuous color)
+│   ├── scene_generator.py     — Combinatorial split + structured analogy generation
+│   └── dataset.py             — Scene/Analogy datasets (+ continuous color)
 ├── trainer.py                 — 4-phase curriculum, TensorBoard, checkpoint
 └── config.py                  — DataConfig, ModelConfig, LossConfig, TrainConfig
 
 scripts/
-├── generate_data.py           — Full dataset generation
+├── generate_data.py           — Full dataset (+ --structured_analogy flag)
 ├── train.py                   — Training entry point
-├── comprehensive_eval.py      — Full E1/E2/E3 + manifold health evaluation
+├── comprehensive_eval.py      — E1/E2/E3/L1/L4 + manifold health evaluation
+├── eval_v8_quick.py           — Quick v8 evaluation script (NEW)
 ├── download_vit_weights.py    — ModelScope weight downloader
 ├── monitor.py                 — AI training companion
 ├── check_env.py               — Environment verification
@@ -257,9 +288,13 @@ scripts/
 docs/
 ├── design/architecture.md     — Authoritative architecture spec
 ├── plan/initial_plan.md       — Original MM-JEPA plan (historical)
-└── report/
-    ├── phase2_wave2_report.md — Root cause analysis + architecture fix report
-    └── phase2_wave3_report.md — VICReg + Decoder results (NEW)
+├── report/
+│   ├── phase2_wave2_report.md — Root cause analysis + architecture fix report
+│   ├── phase2_wave3_report.md — VICReg + Decoder results
+│   └── phase2_wave4_v8_report.md — Structured analogy + continuous color (v8)
+└── superpowers/
+    ├── specs/2026-06-04-v8-... — v8 design spec
+    └── plans/2026-06-04-v8-... — v8 implementation plan
 ```
 
 ## Environment
