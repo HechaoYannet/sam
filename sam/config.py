@@ -34,6 +34,15 @@ class DataConfig:
     total_scenes: int = 20000
     single_object_variants: int = 3  # camera angles per object
 
+    # v8: Continuous color
+    use_continuous_color: bool = False  # enable RGB continuous color
+    color_hue_samples: int = 36  # total hues on the wheel
+    color_anchor_hues: int = 6   # discrete anchor hues for warmup
+
+    # v8: Structured analogy
+    structured_analogy: bool = False  # single-attribute-change analogies
+    n_analogy_variants_per_scene: int = 5  # variants per base scene
+
 
 @dataclass
 class ModelConfig:
@@ -67,6 +76,9 @@ class LossConfig:
     use_decoder: bool = False      # enable decoder bottleneck
     decoder_weight: float = 0.5    # decoder cross-entropy weight
     decoder_hidden: int = 128      # decoder hidden dimension
+
+    # v8: Continuous color decoder
+    color_rgb_weight: float = 0.1  # MSE weight for RGB regression head
 
 
 @dataclass
