@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sam.encoders.color_encoder import ColorEncoder
+
 
 class SymbolEncoder(nn.Module):
     """Structured symbol encoder with per-category embeddings and output heads.
@@ -58,15 +60,21 @@ class SymbolEncoder(nn.Module):
                 nn.LayerNorm(alloc),
             )
 
+        # v8: Continuous color encoder (shared with discrete COL head)
+        self.color_encoder = ColorEncoder(rgb_dim=3, embed_dim=embed_dim, hidden_dim=32)
+
         assert sum(allocations) == manifold_dim, \
             f"Allocation sum {sum(allocations)} != {manifold_dim}"
 
     def forward(self, tokens: dict[str, torch.Tensor],
+                color_rgb: torch.Tensor | None = None,
                 return_per_category: bool = False):
         """Encode structured symbol tokens to manifold point.
 
         Args:
             tokens: Dict mapping category -> LongTensor of shape (B, N_objects)
+            color_rgb: Optional (B, 3) continuous RGB tensor for color path.
+                       When provided, overrides the discrete COL token lookup.
             return_per_category: if True, also returns raw per-category embeddings
 
         Returns:
@@ -80,7 +88,10 @@ class SymbolEncoder(nn.Module):
             head = self.heads[cat]
             emb_layer = self.embeddings[cat]
 
-            if cat in tokens:
+            if cat == 'COL' and color_rgb is not None:
+                # Continuous color path: RGB → ColorEncoder → COL head
+                cat_emb = self.color_encoder(color_rgb)
+            elif cat in tokens:
                 cat_indices = tokens[cat]
                 cat_emb = emb_layer(cat_indices)
                 if cat_emb.dim() == 3:  # (B, N_objects, D) → pool over objects
