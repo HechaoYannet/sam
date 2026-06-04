@@ -1,6 +1,6 @@
 # SAM Project — Progress & Handoff
 
-**Last updated:** 2026-06-04 | **Current phase:** Phase 2 Wave 3 Complete → Wave 4: Analogy & Continuous Space
+**Last updated:** 2026-06-04 | **Current phase:** Phase 2 Wave 4 Implementation Complete → Wave 5: Full Training + Eval
 
 ---
 
@@ -139,6 +139,65 @@ Replace exact-scene-retrieval (infeasible with large candidate sets) with:
 - Per-attribute retrieval accuracy (predicted OBJ/COL/SIZE/MAT match truth?)
 - Displacement vector cosine with ground truth (already measured at 0.95)
 - Single-attribute-change analogy accuracy
+
+---
+
+## Phase 2 Wave 4 — Complete: Structured Analogy + Continuous Color (v8)
+
+### Architecture Changes (13 commits)
+
+| Component | File | Change |
+|-----------|------|--------|
+| ColorEncoder | `sam/encoders/color_encoder.py` (NEW) | RGB(3)→32→64 MLP, maps continuous color to embedding space |
+| Config | `sam/config.py` | 6 new fields: use_continuous_color, color_hue_samples, structured_analogy, etc. |
+| Renderer | `sam/data/renderer.py` | `render_single_object_rgb`, `render_scene_rgb`, color_rgb_override support |
+| Scene Generator | `sam/data/scene_generator.py` | `generate_structured_analogies`, `_make_variant`, `_sample_hues` |
+| SymbolEncoder | `sam/encoders/symbol.py` | ColorEncoder integration, dual-path (discrete/continuous) |
+| Dataset | `sam/data/dataset.py` | color_rgb in tokenize, SceneDataset, AnalogyDataset, collate_fn |
+| Decoder | `sam/losses/vicreg.py` | RGB regression head (sigmoid+MSE) parallel to discrete COL head |
+| Trainer | `sam/trainer.py` | color_rgb passthrough in _scene_step, _analogy_step, validate() |
+| Evaluation | `scripts/comprehensive_eval.py` | L1 unseen hue retrieval, L4 structured analogy per-attribute accuracy |
+
+### Key Design Decisions
+
+1. **Dual-path color encoding:** Discrete tokens pick 6 points in the COL subspace (67-dim); continuous RGB covers the full space. Both share the same COL head — architecture guarantees color is a property of the subspace, not of the token.
+2. **Structured analogies:** Each base scene generates N variants with single-attribute changes. Displacement vector encodes exactly one attribute change — making analogy learning tractable (was: random noise).
+3. **Progressive strategy:** Discrete colors for warmup/relation phases (epoch 1-40), continuous color at analogy phase (epoch 41+). Config flags control the transition.
+4. **Decoder RGB regression:** `torch.sigmoid(Linear→3)` outputs (R,G,B) in [0,1], MSE loss. Auto-switches from CE (discrete) to MSE (continuous) based on presence of `color_rgb` in batch.
+
+### Smoke Test Results (5 epochs, 200 scenes)
+
+All loss terms active and converging:
+- loss_align: 1.44 → 0.47
+- loss_rel: 0.75 (epoch 5, relation phase start)
+- loss_decoder: 0.89 → 0.77
+- VICReg covariance: active (0.0001)
+- Decoder accs above random: OBJ 45%, COL 38%, SIZE 47%, MAT 38%, REL 37%
+
+### Commits
+
+```
+f73a72e fix(eval): add color_rgb to SAMPipeline.encode_symbol in eval script
+40b03f2 feat(data): add --structured_analogy/--random_analogy flags
+09310cb feat(eval): add v8 L1 unseen hue retrieval and L4 structured analogy eval
+92397a4 fix(trainer): pass color_rgb in validate() to fix train/val path mismatch
+e96e5fa feat(trainer): wire continuous color through training pipeline
+0e41087 feat(decoder): add RGB regression head for continuous color
+df6c8e9 feat(dataset): add continuous color support to tokenize and SceneDataset
+b083914 fix(data): wire generate_all to structured analogies, full UUID
+956200d feat(encoders): integrate ColorEncoder into SymbolEncoder dual-path
+a530a45 feat(data): add structured analogy generation and hue sampling
+71d18e9 feat(renderer): add RGB continuous color rendering support
+30b9307 feat(config): add v8 continuous color and structured analogy fields
+a55c571 feat(encoders): add ColorEncoder for continuous RGB→embedding
+```
+
+### Next: Wave 5 — Full Training + Evaluation
+
+- Run full 60-epoch training with v8 on complete dataset (20k scenes)
+- Evaluate L0-L4 against v7 baseline
+- Tune color_rgb_weight if needed
+- Fallback Route B: full continuous retrain if progressive strategy shows regression
 
 ---
 
