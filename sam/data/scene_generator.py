@@ -1,6 +1,9 @@
+import colorsys
+import copy
 import itertools
 import random
 import os
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -10,6 +13,26 @@ from tqdm import tqdm
 
 from sam.config import DataConfig
 from sam.data.renderer import ShapeRenderer
+
+
+def _sample_hues(n: int, saturation: float = 0.8, value: float = 0.9,
+                 offset: float = 0.0) -> list[tuple[float, float, float]]:
+    """Sample n hues evenly on the HSV wheel.
+
+    Args:
+        n: number of hues
+        saturation, value: HSV saturation and value (brightness)
+        offset: hue offset in [0, 1] to shift the wheel
+
+    Returns:
+        List of (r, g, b) tuples with values in [0, 1]
+    """
+    hues = [(i / n + offset) % 1.0 for i in range(n)]
+    colors = []
+    for h in hues:
+        rgb = colorsys.hsv_to_rgb(h, saturation, value)
+        colors.append(tuple(rgb))
+    return colors
 
 
 def _build_attribute_combinations(cfg: DataConfig):
@@ -247,6 +270,120 @@ class SceneGenerator:
             print(f"  -> Generated {len(samples)} analogy samples")
 
         return analogy_samples
+
+    def generate_structured_analogies(self, scenes_metadata,
+                                      n_variants_per_scene: int = 5,
+                                      n_per_split: dict = None):
+        """Generate analogies where A and B differ by exactly ONE attribute.
+
+        For each base scene, creates variants. Each variant changes one
+        attribute of one object. The displacement vector encodes a single
+        attribute change — making analogy learning tractable.
+
+        Args:
+            scenes_metadata: dict mapping split -> list of scene dicts
+            n_variants_per_scene: max variants to create per scene
+            n_per_split: dict mapping split -> max analogies to keep
+
+        Returns:
+            dict mapping split -> list of analogy samples
+        """
+        if n_per_split is None:
+            n_per_split = {"train": 8000, "val": 2000,
+                           "test_iid": 2000, "test_ood": 2000}
+
+        attr_names = ["obj_type", "color", "size", "material", "relation"]
+        alt_pools = {
+            "obj_type": self.cfg.objects,
+            "color": self.cfg.colors,
+            "size": self.cfg.sizes,
+            "material": self.cfg.materials,
+            "relation": self.cfg.relations,
+        }
+
+        analogy_samples = {}
+
+        for split_name, max_n in n_per_split.items():
+            split_scenes = scenes_metadata.get(split_name, [])
+            if len(split_scenes) < 2:
+                print(f"  WARNING: not enough scenes in '{split_name}' for analogy")
+                continue
+
+            print(f"Generating structured analogies for '{split_name}'...")
+            samples = []
+
+            scenes_to_use = split_scenes[:max_n // max(n_variants_per_scene, 1) + 1]
+            for scene in tqdm(scenes_to_use):
+                for attr in attr_names[:n_variants_per_scene]:
+                    variant = self._make_variant(scene, attr, alt_pools, split_name)
+                    if variant is None:
+                        continue
+
+                    samples.append({
+                        "img_a_path": scene["image_path"],
+                        "sym_a": scene.get("symbol_string", ""),
+                        "img_b_path": variant["image_path"],
+                        "sym_b": variant["symbol_string"],
+                        "changed_attribute": attr,
+                        "split": split_name,
+                    })
+
+            # Trim to target count
+            if len(samples) > max_n:
+                indices = self.rng.choice(len(samples), size=max_n, replace=False)
+                samples = [samples[i] for i in indices]
+
+            analogy_samples[split_name] = samples
+            print(f"  -> Generated {len(samples)} structured analogies")
+
+        return analogy_samples
+
+    def _make_variant(self, scene: dict, attr: str,
+                      alt_pools: dict, split_name: str) -> dict | None:
+        """Create a variant of a scene by changing one attribute.
+
+        Renders the variant image and saves it to the images directory.
+        """
+        if attr == "relation":
+            current_val = scene["relation"]
+            alternatives = [r for r in alt_pools["relation"] if r != current_val]
+            if not alternatives:
+                return None
+            new_rel = self.rng.choice(alternatives)
+            variant_scene = copy.deepcopy(scene)
+            variant_scene["relation"] = new_rel
+            img = self.renderer.render_scene(
+                variant_scene["obj_a"], variant_scene["obj_b"], new_rel)
+        else:
+            # Change attribute of a randomly chosen object
+            obj_key = self.rng.choice(["obj_a", "obj_b"])
+            obj = copy.deepcopy(scene[obj_key])
+            current_val = obj.get(attr, "")
+            alternatives = [v for v in alt_pools.get(attr, []) if v != current_val]
+            if not alternatives:
+                return None
+            obj[attr] = self.rng.choice(alternatives)
+
+            variant_scene = copy.deepcopy(scene)
+            variant_scene[obj_key] = obj
+            img = self.renderer.render_scene(
+                variant_scene["obj_a"], variant_scene["obj_b"],
+                variant_scene["relation"])
+
+        # Save variant image
+        fname = f"variant_{split_name}_{uuid.uuid4().hex[:8]}.png"
+        img_path = self.output_dir / "images" / split_name / fname
+        img.save(img_path)
+
+        variant_scene["image_path"] = str(img_path)
+        variant_scene["symbol_string"] = _scene_to_symbol_string(
+            variant_scene["obj_a"], variant_scene["obj_b"],
+            variant_scene["relation"])
+        variant_scene["symbol_tokens"] = _scene_to_symbol_tokens(
+            variant_scene["obj_a"], variant_scene["obj_b"],
+            variant_scene["relation"])
+
+        return variant_scene
 
     def generate_all(self, n_scenes_per_split=None, n_analogy_per_split=None):
         """Run the full data generation pipeline."""
