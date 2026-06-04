@@ -91,9 +91,11 @@ class SAMPipeline(torch.nn.Module):
     def encode_visual(self, x):
         return self.v_proj(self.visual_encoder(x))
 
-    def encode_symbol(self, tokens, return_per_category=False, return_pre_proj=False):
+    def encode_symbol(self, tokens, color_rgb=None, return_per_category=False,
+                      return_pre_proj=False):
         if return_per_category or return_pre_proj:
-            z_pre, per_cat = self.symbol_encoder(tokens, return_per_category=True)
+            z_pre, per_cat = self.symbol_encoder(tokens, color_rgb=color_rgb,
+                                                  return_per_category=True)
             z_post = self.s_proj(z_pre)
             result = [z_post]
             if return_per_category:
@@ -101,7 +103,7 @@ class SAMPipeline(torch.nn.Module):
             if return_pre_proj:
                 result.append(z_pre)
             return tuple(result) if len(result) > 1 else result[0]
-        return self.s_proj(self.symbol_encoder(tokens))
+        return self.s_proj(self.symbol_encoder(tokens, color_rgb=color_rgb))
 
 
 class OldManifoldProjection(torch.nn.Module):
